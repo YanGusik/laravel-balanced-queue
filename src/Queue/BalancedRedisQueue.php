@@ -154,8 +154,11 @@ class BalancedRedisQueue extends RedisQueue
         $activeKey = $this->getActiveKey($queue, $partition);
         $metricsKey = $this->getMetricsKey($queue, $partition);
 
-        // Check if we can process based on limiter
-        if (!$this->limiter->canProcess($redis, $queue, $partition)) {
+        // Check if we can process based on concurrency limit
+        $activeCount = (int) $redis->hlen($activeKey);
+        $maxConcurrent = $this->getLimiterMaxConcurrent();
+
+        if ($activeCount >= $maxConcurrent) {
             // Try another partition
             return $this->tryNextPartition($queue, $partition);
         }
@@ -185,6 +188,7 @@ class BalancedRedisQueue extends RedisQueue
             $this->container,
             $this,
             $payload,
+            $payload, // reserved is same as payload for balanced queue
             $this->connectionName,
             $queue,
             $partition,
@@ -199,12 +203,16 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
         $partitionsKey = $this->getPartitionsKey($queue);
+        $maxConcurrent = $this->getLimiterMaxConcurrent();
 
         $partitions = $redis->smembers($partitionsKey);
         $partitions = array_diff($partitions, [$excludePartition]);
 
         foreach ($partitions as $partition) {
-            if ($this->limiter->canProcess($redis, $queue, $partition)) {
+            $activeKey = $this->getActiveKey($queue, $partition);
+            $activeCount = (int) $redis->hlen($activeKey);
+
+            if ($activeCount < $maxConcurrent) {
                 $job = $this->popFromPartition($queue, $partition);
                 if ($job !== null) {
                     return $job;
@@ -222,8 +230,9 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
 
-        // Release the concurrency slot
-        $this->limiter->release($redis, $queue, $partition, $jobId);
+        // Release the concurrency slot directly from our active key
+        $activeKey = $this->getActiveKey($queue, $partition);
+        $redis->hdel($activeKey, $jobId);
 
         // Re-add to partition queue
         if ($delay > 0) {
@@ -244,8 +253,9 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
 
-        // Release the concurrency slot
-        $this->limiter->release($redis, $queue, $partition, $jobId);
+        // Release the concurrency slot directly from our active key
+        $activeKey = $this->getActiveKey($queue, $partition);
+        $redis->hdel($activeKey, $jobId);
     }
 
     /**
@@ -314,5 +324,37 @@ class BalancedRedisQueue extends RedisQueue
     public function getDelayedKey(string $queue, string $partition): string
     {
         return "{$this->prefix}:{$queue}:{$partition}:delayed";
+    }
+
+    /**
+     * Get the number of jobs ready to process (for Horizon compatibility).
+     */
+    public function readyNow($queue = null): int
+    {
+        return $this->size($queue);
+    }
+
+    /**
+     * Get the size of the queue (total jobs across all partitions).
+     */
+    public function size($queue = null): int
+    {
+        $queue = $this->getQueue($queue);
+        $redis = $this->getConnection();
+        $partitionsKey = $this->getPartitionsKey($queue);
+
+        $partitions = $redis->smembers($partitionsKey);
+
+        if (empty($partitions)) {
+            return 0;
+        }
+
+        $total = 0;
+        foreach ($partitions as $partition) {
+            $queueKey = $this->getPartitionQueueKey($queue, $partition);
+            $total += (int) $redis->llen($queueKey);
+        }
+
+        return $total;
     }
 }

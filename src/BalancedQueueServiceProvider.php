@@ -4,12 +4,13 @@ declare(strict_types=1);
 
 namespace YanGusik\BalancedQueue;
 
-use Illuminate\Contracts\Support\DeferrableProvider;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
+use YanGusik\BalancedQueue\Console\BalancedQueueClearCommand;
+use YanGusik\BalancedQueue\Console\BalancedQueueTableCommand;
 use YanGusik\BalancedQueue\Queue\BalancedQueueConnector;
 
-class BalancedQueueServiceProvider extends ServiceProvider implements DeferrableProvider
+class BalancedQueueServiceProvider extends ServiceProvider
 {
     /**
      * Register services.
@@ -38,6 +39,7 @@ class BalancedQueueServiceProvider extends ServiceProvider implements Deferrable
         ], 'balanced-queue-config');
 
         $this->registerQueueConnector();
+        $this->registerCommands();
     }
 
     /**
@@ -57,13 +59,15 @@ class BalancedQueueServiceProvider extends ServiceProvider implements Deferrable
     }
 
     /**
-     * Get the services provided by the provider.
+     * Register artisan commands.
      */
-    public function provides(): array
+    protected function registerCommands(): void
     {
-        return [
-            BalancedQueueManager::class,
-            'balanced-queue',
-        ];
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                BalancedQueueTableCommand::class,
+                BalancedQueueClearCommand::class,
+            ]);
+        }
     }
 }

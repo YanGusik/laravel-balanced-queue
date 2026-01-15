@@ -10,10 +10,23 @@ Imagine you have an AI generation service where users can submit unlimited tasks
 - Resource-heavy users can exhaust API rate limits
 
 **Laravel Balanced Queue** solves this by:
-- ✅ Distributing jobs fairly across all users
-- ✅ Limiting concurrent jobs per user (e.g., max 2 AI generations per user)
-- ✅ Never rejecting jobs - they queue up and execute eventually
-- ✅ Preventing single users from monopolizing workers
+- Distributing jobs fairly across all users (round-robin)
+- Limiting concurrent jobs per user (e.g., max 2 AI generations per user)
+- Never rejecting jobs - they queue up and execute eventually
+- Preventing single users from monopolizing workers
+
+## How It Works (Visual)
+
+```
+Without Balanced Queue:              With Balanced Queue:
+
+User A: [1][2][3][4][5][6][7][8]     User A: [1]    [4]    [7]
+User B: [1][2]                       User B:    [1]    [2]
+User C: [1][2]                       User C:       [1]    [2]
+
+Execution: AAAAAAAA BB CC            Execution: A B C A B C A A A...
+User B waits for all A tasks!        Everyone gets fair turns!
+```
 
 ## Installation
 
@@ -29,22 +42,24 @@ php artisan vendor:publish --tag=balanced-queue-config
 
 ## Quick Start
 
-### 1. Configure Your Queue Connection
+### Step 1: Add Queue Connection
 
-In `config/queue.php`, add a balanced queue connection:
+Add to `config/queue.php`:
 
 ```php
 'connections' => [
+    // ... your existing connections
+
     'balanced' => [
         'driver' => 'balanced',
-        'connection' => 'default', // Redis connection
+        'connection' => 'default', // Redis connection from database.php
         'queue' => 'default',
         'retry_after' => 90,
     ],
 ],
 ```
 
-### 2. Create a Job with Partition Support
+### Step 2: Create a Job
 
 ```php
 <?php
@@ -56,7 +71,7 @@ use YanGusik\BalancedQueue\Jobs\BalancedDispatchable;
 
 class GenerateAIImage implements ShouldQueue
 {
-    use BalancedDispatchable;
+    use BalancedDispatchable;  // Instead of standard Dispatchable
 
     public function __construct(
         public int $userId,
@@ -70,28 +85,122 @@ class GenerateAIImage implements ShouldQueue
 }
 ```
 
-### 3. Dispatch Jobs
+### Step 3: Dispatch Jobs
 
 ```php
-// Option 1: Automatic partition from $userId property
+// The job will automatically use $userId as partition key
 GenerateAIImage::dispatch($userId, $prompt)
     ->onConnection('balanced')
     ->onQueue('ai-generation');
 
-// Option 2: Explicit partition
+// Or explicitly set partition
 GenerateAIImage::dispatch($userId, $prompt)
     ->onPartition($userId)
-    ->onConnection('balanced')
-    ->onQueue('ai-generation');
+    ->onConnection('balanced');
 ```
 
-### 4. Run Workers
+### Step 4: Run Workers
 
 ```bash
+# Standard Laravel worker
 php artisan queue:work balanced --queue=ai-generation
+
+# Or with Horizon (see Horizon section below)
 ```
 
 That's it! Jobs are now distributed fairly with max 2 concurrent per user.
+
+---
+
+## Laravel Horizon Integration
+
+### Configuration
+
+Add a supervisor for balanced queue in `config/horizon.php`:
+
+```php
+'environments' => [
+    'local' => [
+        // Your other supervisors...
+
+        'supervisor-balanced' => [
+            'connection' => 'balanced',      // Must match connection name in queue.php
+            'queue' => ['default'],          // Queue names to process
+            'maxProcesses' => 4,             // Number of workers
+            'tries' => 1,
+            'timeout' => 300,
+        ],
+    ],
+
+    'production' => [
+        'supervisor-balanced' => [
+            'connection' => 'balanced',
+            'queue' => ['default', 'ai-generation'],
+            'maxProcesses' => 10,
+            'tries' => 1,
+            'timeout' => 300,
+            'balance' => 'auto',             // Horizon's auto-scaling
+        ],
+    ],
+],
+```
+
+### Important: What Works and What Doesn't with Horizon
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Job execution | Works | Jobs execute normally through Horizon workers |
+| Completed jobs list | Works | Shows in Horizon dashboard after completion |
+| Failed jobs list | Works | Failed jobs appear in Horizon |
+| Worker metrics | Works | CPU, memory, throughput visible |
+| **Pending jobs count** | **Doesn't work** | Horizon shows 0 pending |
+| **horizon:clear** | **Doesn't work** | Use `balanced-queue:clear` instead |
+
+**Why?** Balanced Queue uses a different Redis key structure (partitioned queues) than standard Laravel queues. Horizon expects jobs in `queues:{name}` but we store them in `balanced-queue:{queue}:{partition}`.
+
+### Monitoring Commands
+
+Use built-in commands instead of Horizon for queue management:
+
+```bash
+# View live statistics (updates every 2 seconds)
+php artisan balanced-queue:table --watch
+
+# One-time stats view
+php artisan balanced-queue:table
+
+# Clear all jobs from balanced queue
+php artisan balanced-queue:clear
+
+# Clear specific partition only
+php artisan balanced-queue:clear --partition=user:123
+
+# Force clear without confirmation
+php artisan balanced-queue:clear --force
+```
+
+**Example output of `balanced-queue:table --watch`:**
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║            BALANCED QUEUE MONITOR - default
+╚══════════════════════════════════════════════════════════════╝
+
++------------+--------+---------+--------+-----------+
+| Partition  | Status | Pending | Active | Processed |
++------------+--------+---------+--------+-----------+
+| user:456   | ●      | 15      | 2      | 45        |
+| user:123   | ●      | 8       | 2      | 120       |
+| user:789   | ○      | 3       | 0      | 12        |
++------------+--------+---------+--------+-----------+
+
+  Total: 26 pending, 4 active, 3 partitions
+
+  Strategy: round-robin | Max concurrent: 2
+  Updated: 14:32:15
+```
+
+---
 
 ## Configuration
 
@@ -106,13 +215,13 @@ Choose how partitions are selected for processing:
 
 | Strategy | Description | Best For |
 |----------|-------------|----------|
-| `random` | Random partition selection (SRANDMEMBER) | High-load, stateless systems |
-| `round-robin` | Strict sequential: A→B→C→A→B→C | Fair distribution, predictable |
-| `smart` | Considers queue size + wait time | Preventing starvation |
+| `random` | Random partition selection (Redis SRANDMEMBER) | High-load, stateless systems |
+| `round-robin` | Strict sequential: A→B→C→A→B→C | **Recommended.** Fair distribution |
+| `smart` | Considers queue size + wait time, boosts small queues | Preventing starvation of small users |
 
 ### Concurrency Limiters
 
-Control how many jobs run concurrently per partition:
+Control how many jobs run simultaneously per partition:
 
 ```php
 // config/balanced-queue.php
@@ -127,9 +236,9 @@ Control how many jobs run concurrently per partition:
 
 | Limiter | Description | Best For |
 |---------|-------------|----------|
-| `null` | No limits | When you only need distribution |
-| `simple` | Fixed limit per partition | Most use cases |
-| `adaptive` | Dynamic limit based on load | Auto-scaling scenarios |
+| `null` | No limits, unlimited parallel jobs | When you only need fair distribution |
+| `simple` | Fixed limit per partition (e.g., max 2) | **Recommended.** Most use cases |
+| `adaptive` | Dynamic limit based on system load | Auto-scaling scenarios |
 
 ### Environment Variables
 
@@ -142,7 +251,40 @@ BALANCED_QUEUE_PREFIX=balanced-queue
 BALANCED_QUEUE_REDIS_CONNECTION=default
 ```
 
-## Advanced Usage
+---
+
+## Partition Keys
+
+### Automatic Detection
+
+The `BalancedDispatchable` trait automatically detects partition key from common property names:
+
+```php
+class MyJob implements ShouldQueue
+{
+    use BalancedDispatchable;
+
+    public function __construct(
+        public int $userId  // Automatically used as partition key
+    ) {}
+}
+```
+
+Supported auto-detected properties: `$userId`, `$user_id`, `$tenantId`, `$tenant_id`
+
+### Explicit Partition
+
+```php
+// Set partition when dispatching
+MyJob::dispatch($data)
+    ->onPartition("user:{$userId}")
+    ->onConnection('balanced');
+
+// Or set in job constructor
+MyJob::dispatch($data)
+    ->onPartition($companyId)
+    ->onConnection('balanced');
+```
 
 ### Custom Partition Logic
 
@@ -153,13 +295,11 @@ class ProcessOrder implements ShouldQueue
 {
     use BalancedDispatchable;
 
-    public function __construct(
-        public Order $order
-    ) {}
+    public function __construct(public Order $order) {}
 
     public function getPartitionKey(): string
     {
-        // Partition by merchant, not user
+        // Partition by merchant instead of user
         return "merchant:{$this->order->merchant_id}";
     }
 }
@@ -167,7 +307,7 @@ class ProcessOrder implements ShouldQueue
 
 ### Global Partition Resolver
 
-Set a resolver in the config:
+Set a default resolver in config for all jobs:
 
 ```php
 // config/balanced-queue.php
@@ -176,7 +316,11 @@ Set a resolver in the config:
 },
 ```
 
-### Monitoring
+---
+
+## Advanced Usage
+
+### Programmatic Metrics
 
 ```php
 use YanGusik\BalancedQueue\Support\Metrics;
@@ -184,24 +328,42 @@ use YanGusik\BalancedQueue\Support\Metrics;
 $metrics = new Metrics();
 
 // Get queue summary
-$summary = $metrics->getSummary('ai-generation');
-// Returns: ['partitions' => 5, 'total_queued' => 100, 'total_active' => 10, ...]
+$summary = $metrics->getSummary('default');
+// Returns: [
+//     'partitions' => 5,
+//     'total_queued' => 100,
+//     'total_active' => 10,
+//     'partitions_stats' => [...]
+// ]
 
 // Get per-partition stats
-$stats = $metrics->getQueueStats('ai-generation');
-// Returns: ['user:1' => ['queued' => 10, 'active' => 2], ...]
+$stats = $metrics->getQueueStats('default');
+// Returns: [
+//     'user:123' => ['queued' => 10, 'active' => 2, 'metrics' => [...]],
+//     'user:456' => ['queued' => 5, 'active' => 1, 'metrics' => [...]],
+// ]
+
+// Clear queue programmatically
+$metrics->clearQueue('default');
 ```
 
 ### Custom Strategy
 
 ```php
 use YanGusik\BalancedQueue\Contracts\PartitionStrategy;
+use Illuminate\Contracts\Redis\Connection;
 
 class PriorityStrategy implements PartitionStrategy
 {
-    public function selectPartition($redis, $queue, $partitionsKey): ?string
+    public function selectPartition(Connection $redis, string $queue, string $partitionsKey): ?string
     {
-        // Your custom logic
+        // Get all partitions
+        $partitions = $redis->smembers($partitionsKey);
+
+        // Your priority logic here
+        // e.g., check user subscription level, queue size, etc.
+
+        return $selectedPartition;
     }
 
     public function getName(): string
@@ -214,11 +376,14 @@ class PriorityStrategy implements PartitionStrategy
 Register in config:
 
 ```php
+// config/balanced-queue.php
 'strategies' => [
     'priority' => [
         'class' => App\Queue\PriorityStrategy::class,
     ],
 ],
+
+'strategy' => 'priority',
 ```
 
 ### Custom Limiter
@@ -230,57 +395,135 @@ class PlanBasedLimiter implements ConcurrencyLimiter
 {
     public function canProcess($redis, $queue, $partition): bool
     {
-        $user = $this->getUserFromPartition($partition);
-        $limit = $user->plan->concurrent_limit;
+        $userId = str_replace('user:', '', $partition);
+        $user = User::find($userId);
+        $limit = $user->subscription->concurrent_limit ?? 1;
 
         return $this->getActiveCount($redis, $queue, $partition) < $limit;
     }
 
-    // ... implement other methods
+    // ... implement other interface methods
 }
 ```
 
-## How It Works
+---
 
-### Redis Structure
+## Redis Structure
+
+Understanding the Redis key structure helps with debugging:
 
 ```
-balanced-queue:{queue}:partitions         → SET of partition keys
-balanced-queue:{queue}:{partition}        → LIST of jobs
-balanced-queue:{queue}:{partition}:active → HASH of active job IDs
-balanced-queue:metrics:{queue}:{partition} → HASH of metrics
+{prefix}:{queue}:partitions              → SET of partition names
+{prefix}:{queue}:{partition}             → LIST of job payloads
+{prefix}:{queue}:{partition}:active      → HASH of currently running job IDs
+{prefix}:metrics:{queue}:{partition}     → HASH of metrics (pushed, popped counts)
+{prefix}:rr-state:{queue}                → STRING round-robin counter
 ```
 
-### Flow
+Example with default prefix and queue:
 
-1. **Push**: Job is added to partition queue, partition registered in set
-2. **Pop**: Strategy selects partition → Limiter checks concurrency → Job dequeued
-3. **Process**: Job ID tracked in active hash
-4. **Complete**: Job ID removed from active hash, slot freed
+```
+balanced-queue:queues:default:partitions       → {"user:123", "user:456"}
+balanced-queue:queues:default:user:123         → [job1_payload, job2_payload, ...]
+balanced-queue:queues:default:user:123:active  → {job_uuid: timestamp, ...}
+```
+
+### Debugging with Redis CLI
+
+```bash
+# List all balanced queue keys
+redis-cli keys "balanced-queue*"
+
+# See all partitions
+redis-cli smembers "balanced-queue:queues:default:partitions"
+
+# Check pending jobs for a partition
+redis-cli llen "balanced-queue:queues:default:user:123"
+
+# Check active jobs for a partition
+redis-cli hgetall "balanced-queue:queues:default:user:123:active"
+
+# Clear stuck active jobs (if worker crashed)
+redis-cli del "balanced-queue:queues:default:user:123:active"
+```
+
+---
+
+## Troubleshooting
+
+### Jobs not executing
+
+1. Check that connection name matches in `queue.php` and when dispatching:
+   ```php
+   ->onConnection('balanced')  // Must match 'balanced' in queue.php
+   ```
+
+2. Verify worker is running with correct connection:
+   ```bash
+   php artisan queue:work balanced
+   ```
+
+### Jobs stuck / not completing
+
+Check for orphaned active job entries:
+
+```bash
+# View active jobs
+redis-cli hgetall "balanced-queue:queues:default:{partition}:active"
+
+# Clear if stuck (jobs older than retry_after)
+redis-cli del "balanced-queue:queues:default:{partition}:active"
+```
+
+### Horizon shows 0 pending jobs
+
+This is expected behavior. Use `balanced-queue:table` command instead:
+
+```bash
+php artisan balanced-queue:table --watch
+```
+
+### Workers idle but jobs pending
+
+Check if all partitions hit their concurrency limit:
+
+```bash
+php artisan balanced-queue:table
+```
+
+If all partitions show `Active = max_concurrent`, workers are waiting for slots to free up.
+
+---
 
 ## Testing
 
 ```bash
+# Run package tests
 composer test
+
+# Test in your app
+php artisan tinker
+
+>>> use App\Jobs\MyJob;
+>>> MyJob::dispatch($userId, $data)->onPartition($userId)->onConnection('balanced');
 ```
 
-## Horizon Compatibility
-
-Works with Laravel Horizon out of the box. Jobs appear in Horizon dashboard as normal Redis jobs.
+---
 
 ## Requirements
 
 - PHP 8.1+
 - Laravel 10.x, 11.x, or 12.x
-- Redis (phpredis or predis)
+- Redis with phpredis or predis
+- Laravel Horizon (optional, for worker management)
 
 ## Credits
 
 Inspired by [aloware/fair-queue](https://github.com/aloware/fair-queue) with improvements:
-- Multiple partition strategies
+- Multiple partition strategies (not just random)
 - Built-in concurrency limiters
-- Cleaner architecture
-- Better extensibility
+- Artisan commands for monitoring
+- Cleaner, extensible architecture
 
 ## License
 
