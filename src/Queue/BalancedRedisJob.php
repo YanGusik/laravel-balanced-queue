@@ -21,12 +21,13 @@ class BalancedRedisJob extends RedisJob
         Container $container,
         BalancedRedisQueue $redis,
         string $job,
+        string $reserved,
         string $connectionName,
         string $queue,
         string $partition,
         string $jobId
     ) {
-        parent::__construct($container, $redis, $job, $connectionName, $queue);
+        parent::__construct($container, $redis, $job, $reserved, $connectionName, $queue);
 
         $this->partition = $partition;
         $this->balancedJobId = $jobId;
