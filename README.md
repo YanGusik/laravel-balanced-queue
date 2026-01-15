@@ -15,17 +15,91 @@ Imagine you have an AI generation service where users can submit unlimited tasks
 - Never rejecting jobs - they queue up and execute eventually
 - Preventing single users from monopolizing workers
 
-## How It Works (Visual)
+## How It Works
+
+### The Problem
 
 ```
-Without Balanced Queue:              With Balanced Queue:
+Standard Laravel Queue (FIFO):
 
-User A: [1][2][3][4][5][6][7][8]     User A: [1]    [4]    [7]
-User B: [1][2]                       User B:    [1]    [2]
-User C: [1][2]                       User C:       [1]    [2]
+Queue: [A1][A2][A3][A4][A5][A6][A7][A8][B1][B2][C1][C2]
+        ─────────────────────────────→ time
 
-Execution: AAAAAAAA BB CC            Execution: A B C A B C A A A...
-User B waits for all A tasks!        Everyone gets fair turns!
+Execution order: A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8 → B1 → B2 → C1 → C2
+
+User A submitted 8 tasks first.
+User B and C must wait until ALL of User A's tasks complete!
+```
+
+### The Solution
+
+Balanced Queue partitions jobs by user and rotates between them:
+
+```
+Balanced Queue (partitioned):
+
+Partition A: [A1][A2][A3][A4][A5][A6][A7][A8]
+Partition B: [B1][B2]
+Partition C: [C1][C2]
+
+Execution order: A1 → B1 → C1 → A2 → B2 → C2 → A3 → A4 → A5...
+
+Everyone gets fair turns! User B doesn't wait for all 8 of User A's tasks.
+```
+
+### Strategy Comparison
+
+**Round-Robin Strategy** (recommended) — strict rotation:
+
+```
+Partitions:  [A: 5 jobs] [B: 2 jobs] [C: 2 jobs]
+
+Worker 1:    A1 ──────── B1 ──────── C1 ──────── A2 ──────── B2 ────────
+Worker 2:       ──────── A3 ──────── C2 ──────── A4 ──────── A5 ────────
+
+Order: A → B → C → A → B → C → A → A → A
+       └── cycles through all partitions equally
+```
+
+**Random Strategy** — unpredictable but fast:
+
+```
+Partitions:  [A: 5 jobs] [B: 2 jobs] [C: 2 jobs]
+
+Worker 1:    A1 ──────── A2 ──────── B1 ──────── C1 ──────── A3 ────────
+Worker 2:       ──────── C2 ──────── A4 ──────── B2 ──────── A5 ────────
+
+Order: Random selection each time (stateless, good for high load)
+```
+
+**Smart Strategy** — prioritizes smaller queues:
+
+```
+Partitions:  [A: 50 jobs] [B: 3 jobs] [C: 2 jobs]
+                  │            │           │
+             (deprioritized)  (boost)    (boost)
+
+Worker 1:    B1 ──────── C1 ──────── B2 ──────── C2 ──────── B3 ────────
+Worker 2:       ──────── A1 ──────── A2 ──────── A3 ──────── A4 ────────
+
+Small queues (B, C) get processed faster, preventing starvation.
+User A's 50 jobs won't block users with just a few tasks.
+```
+
+### Concurrency Limiting
+
+With `max_concurrent: 2` per partition:
+
+```
+Partition A: [A1][A2][A3][A4][A5] waiting
+                 │   │
+             ┌───┴───┴───┐
+             │  Active   │
+             │  A1  A2   │ ← max 2 running simultaneously
+             └───────────┘
+
+A3, A4, A5 wait until A1 or A2 completes.
+Other partitions (B, C) can still run their jobs!
 ```
 
 ## Installation
