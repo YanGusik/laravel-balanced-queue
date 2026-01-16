@@ -28,7 +28,8 @@ class Metrics
      */
     public function getPartitions(string $queue): array
     {
-        $key = "{$this->prefix}:{$queue}:partitions";
+        $queueKey = "queues:{$queue}";
+        $key = "{$this->prefix}:{$queueKey}:partitions";
 
         return $this->redis->smembers($key) ?: [];
     }
@@ -38,7 +39,8 @@ class Metrics
      */
     public function getQueueSize(string $queue, string $partition): int
     {
-        $key = "{$this->prefix}:{$queue}:{$partition}";
+        $queueKey = "queues:{$queue}";
+        $key = "{$this->prefix}:{$queueKey}:{$partition}";
 
         return (int) $this->redis->llen($key);
     }
@@ -48,7 +50,8 @@ class Metrics
      */
     public function getActiveCount(string $queue, string $partition): int
     {
-        $key = "{$this->prefix}:{$queue}:{$partition}:active";
+        $queueKey = "queues:{$queue}";
+        $key = "{$this->prefix}:{$queueKey}:{$partition}:active";
 
         return (int) $this->redis->hlen($key);
     }
@@ -92,9 +95,10 @@ class Metrics
     {
         $partitions = $this->getPartitions($queue);
         $stats = [];
+        $queueKey = "queues:{$queue}";
 
         foreach ($partitions as $partition) {
-            $metricsKey = "{$this->prefix}:metrics:{$queue}:{$partition}";
+            $metricsKey = "{$this->prefix}:metrics:{$queueKey}:{$partition}";
             $metrics = $this->redis->hgetall($metricsKey) ?: [];
 
             $stats[$partition] = [
@@ -138,14 +142,15 @@ class Metrics
     public function clearQueue(string $queue): void
     {
         $partitions = $this->getPartitions($queue);
+        $queueKey = "queues:{$queue}";
 
         foreach ($partitions as $partition) {
-            $this->redis->del("{$this->prefix}:{$queue}:{$partition}");
-            $this->redis->del("{$this->prefix}:{$queue}:{$partition}:active");
-            $this->redis->del("{$this->prefix}:{$queue}:{$partition}:delayed");
-            $this->redis->del("{$this->prefix}:metrics:{$queue}:{$partition}");
+            $this->redis->del("{$this->prefix}:{$queueKey}:{$partition}");
+            $this->redis->del("{$this->prefix}:{$queueKey}:{$partition}:active");
+            $this->redis->del("{$this->prefix}:{$queueKey}:{$partition}:delayed");
+            $this->redis->del("{$this->prefix}:metrics:{$queueKey}:{$partition}");
         }
 
-        $this->redis->del("{$this->prefix}:{$queue}:partitions");
+        $this->redis->del("{$this->prefix}:{$queueKey}:partitions");
     }
 }
