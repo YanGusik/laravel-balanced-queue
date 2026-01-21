@@ -2,9 +2,6 @@
 
 A Laravel package for queue management with load balancing between partitions (user groups). Perfect for scenarios where you need fair job distribution and concurrency control per user/tenant.
 
-<img width="1536" height="1024" alt="test1" src="https://github.com/user-attachments/assets/9add0fb0-519b-4e3d-a98a-2ede69fc3fa4" />
-
-
 ## Problem Solved
 
 Imagine you have an AI generation service where users can submit unlimited tasks. Without balanced queuing:
