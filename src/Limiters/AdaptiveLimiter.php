@@ -41,7 +41,28 @@ class AdaptiveLimiter implements ConcurrencyLimiter
     public function canProcess(Connection $redis, string $queue, string $partition): bool
     {
         $currentLimit = $this->calculateCurrentLimit($redis, $queue);
-        $activeCount = $this->getActiveCount($redis, $queue, $partition);
+        $activeKey = $this->getActiveKey($queue, $partition);
+
+        // Lazy cleanup: remove stale entries and return actual count
+        $script = <<<'LUA'
+            local active_key = KEYS[1]
+            local threshold = tonumber(ARGV[1])
+
+            local entries = redis.call('HGETALL', active_key)
+
+            for i = 1, #entries, 2 do
+                local job_id = entries[i]
+                local timestamp = tonumber(entries[i+1])
+                if timestamp and timestamp < threshold then
+                    redis.call('HDEL', active_key, job_id)
+                end
+            end
+
+            return redis.call('HLEN', active_key)
+        LUA;
+
+        $threshold = time() - $this->lockTtl;
+        $activeCount = (int) $redis->eval($script, 1, $activeKey, $threshold);
 
         return $activeCount < $currentLimit;
     }
@@ -51,12 +72,24 @@ class AdaptiveLimiter implements ConcurrencyLimiter
         $activeKey = $this->getActiveKey($queue, $partition);
         $currentLimit = $this->calculateCurrentLimit($redis, $queue);
 
+        // Use Lua script for atomic cleanup + check-and-set
         $script = <<<'LUA'
             local active_key = KEYS[1]
             local job_id = ARGV[1]
             local max_concurrent = tonumber(ARGV[2])
             local ttl = tonumber(ARGV[3])
-            local current_time = ARGV[4]
+            local current_time = tonumber(ARGV[4])
+            local threshold = tonumber(ARGV[5])
+
+            -- Lazy cleanup: remove stale entries first
+            local entries = redis.call('HGETALL', active_key)
+            for i = 1, #entries, 2 do
+                local entry_job_id = entries[i]
+                local timestamp = tonumber(entries[i+1])
+                if timestamp and timestamp < threshold then
+                    redis.call('HDEL', active_key, entry_job_id)
+                end
+            end
 
             local current_count = redis.call('HLEN', active_key)
 
@@ -69,6 +102,9 @@ class AdaptiveLimiter implements ConcurrencyLimiter
             return 0
         LUA;
 
+        $now = time();
+        $threshold = $now - $this->lockTtl;
+
         $result = $redis->eval(
             $script,
             1,
@@ -76,7 +112,8 @@ class AdaptiveLimiter implements ConcurrencyLimiter
             $jobId,
             $currentLimit,
             $this->lockTtl,
-            time()
+            $now,
+            $threshold
         );
 
         // Update metrics
@@ -97,7 +134,27 @@ class AdaptiveLimiter implements ConcurrencyLimiter
     {
         $activeKey = $this->getActiveKey($queue, $partition);
 
-        return (int) $redis->hlen($activeKey);
+        // Lazy cleanup: remove stale entries and return actual count
+        $script = <<<'LUA'
+            local active_key = KEYS[1]
+            local threshold = tonumber(ARGV[1])
+
+            local entries = redis.call('HGETALL', active_key)
+
+            for i = 1, #entries, 2 do
+                local job_id = entries[i]
+                local timestamp = tonumber(entries[i+1])
+                if timestamp and timestamp < threshold then
+                    redis.call('HDEL', active_key, job_id)
+                end
+            end
+
+            return redis.call('HLEN', active_key)
+        LUA;
+
+        $threshold = time() - $this->lockTtl;
+
+        return (int) $redis->eval($script, 1, $activeKey, $threshold);
     }
 
     public function getName(): string

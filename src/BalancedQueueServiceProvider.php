@@ -5,10 +5,14 @@ declare(strict_types=1);
 namespace YanGusik\BalancedQueue;
 
 use Illuminate\Queue\QueueManager;
+use Illuminate\Routing\Router;
 use Illuminate\Support\ServiceProvider;
 use YanGusik\BalancedQueue\Console\BalancedQueueClearCommand;
 use YanGusik\BalancedQueue\Console\BalancedQueueTableCommand;
+use YanGusik\BalancedQueue\Http\Controllers\PrometheusController;
+use YanGusik\BalancedQueue\Http\Middleware\IpWhitelist;
 use YanGusik\BalancedQueue\Queue\BalancedQueueConnector;
+use YanGusik\BalancedQueue\Support\PrometheusExporter;
 
 class BalancedQueueServiceProvider extends ServiceProvider
 {
@@ -27,6 +31,10 @@ class BalancedQueueServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(BalancedQueueManager::class, 'balanced-queue');
+
+        $this->app->singleton(PrometheusExporter::class, function () {
+            return new PrometheusExporter();
+        });
     }
 
     /**
@@ -40,6 +48,7 @@ class BalancedQueueServiceProvider extends ServiceProvider
 
         $this->registerQueueConnector();
         $this->registerCommands();
+        $this->registerPrometheusRoute();
     }
 
     /**
@@ -69,5 +78,49 @@ class BalancedQueueServiceProvider extends ServiceProvider
                 BalancedQueueClearCommand::class,
             ]);
         }
+    }
+
+    /**
+     * Register the Prometheus metrics route.
+     */
+    protected function registerPrometheusRoute(): void
+    {
+        if (! config('balanced-queue.prometheus.enabled', false)) {
+            return;
+        }
+
+        /** @var Router $router */
+        $router = $this->app['router'];
+
+        // Register the middleware alias
+        $router->aliasMiddleware('balanced-queue.ip_whitelist', IpWhitelist::class);
+
+        $route = config('balanced-queue.prometheus.route', '/balanced-queue/metrics');
+        $middleware = $this->getPrometheusMiddleware();
+
+        $router->get($route, [PrometheusController::class, 'metrics'])
+            ->middleware($middleware)
+            ->name('balanced-queue.prometheus.metrics');
+    }
+
+    /**
+     * Get the middleware to apply to the Prometheus route.
+     *
+     * @return array<string>
+     */
+    protected function getPrometheusMiddleware(): array
+    {
+        $middleware = config('balanced-queue.prometheus.middleware');
+
+        if ($middleware === null || $middleware === '') {
+            return [];
+        }
+
+        if ($middleware === 'ip_whitelist') {
+            return ['balanced-queue.ip_whitelist'];
+        }
+
+        // Support for auth.basic and other Laravel middleware
+        return [$middleware];
     }
 }

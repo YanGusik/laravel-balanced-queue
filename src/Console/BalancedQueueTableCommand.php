@@ -6,11 +6,13 @@ namespace YanGusik\BalancedQueue\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Redis;
+use YanGusik\BalancedQueue\Support\Metrics;
 
 class BalancedQueueTableCommand extends Command
 {
     protected $signature = 'balanced-queue:table
                             {queue=default : The queue name}
+                            {--all : Show all active queues}
                             {--watch : Watch mode with auto-refresh}
                             {--interval=2 : Refresh interval in seconds}';
 
@@ -21,30 +23,82 @@ class BalancedQueueTableCommand extends Command
     public function handle(): int
     {
         $this->prefix = config('balanced-queue.redis.prefix', 'balanced-queue');
-        $queue = $this->argument('queue');
+        $showAll = $this->option('all');
         $watch = $this->option('watch');
         $interval = (int) $this->option('interval');
 
-        if ($watch) {
-            $this->watch($queue, $interval);
+        if ($showAll) {
+            $queues = $this->getAllQueues();
+            if (empty($queues)) {
+                $this->warn('No active queues found');
+                return Command::SUCCESS;
+            }
         } else {
-            $this->displayTable($queue);
+            $queues = [$this->argument('queue')];
+        }
+
+        if ($watch) {
+            $this->watchQueues($queues, $interval);
+        } else {
+            $this->displayQueues($queues);
         }
 
         return Command::SUCCESS;
     }
 
-    protected function watch(string $queue, int $interval): void
+    /**
+     * Get all active queues.
+     *
+     * @return array<string>
+     */
+    protected function getAllQueues(): array
     {
-        $this->info("Watching balanced queue '{$queue}' (Ctrl+C to exit)");
+        $metrics = new Metrics(null, $this->prefix);
+
+        return $metrics->getAllQueues();
+    }
+
+    /**
+     * Display tables for multiple queues.
+     *
+     * @param array<string> $queues
+     */
+    protected function displayQueues(array $queues): void
+    {
+        foreach ($queues as $index => $queue) {
+            if ($index > 0) {
+                $this->newLine();
+            }
+            if (count($queues) > 1) {
+                $this->info("Queue: {$queue}");
+                $this->line(str_repeat('-', 40));
+            }
+            $this->displayTable($queue);
+        }
+    }
+
+    /**
+     * Watch multiple queues.
+     *
+     * @param array<string> $queues
+     */
+    protected function watchQueues(array $queues, int $interval): void
+    {
+        $queueList = implode(', ', $queues);
+        $this->info("Watching queues: {$queueList} (Ctrl+C to exit)");
         $this->newLine();
 
         while (true) {
             // Clear screen
             $this->output->write("\033[2J\033[H");
 
-            $this->displayHeader($queue);
-            $this->displayTable($queue);
+            foreach ($queues as $index => $queue) {
+                if ($index > 0) {
+                    $this->newLine();
+                }
+                $this->displayHeader($queue);
+                $this->displayTable($queue);
+            }
             $this->displayFooter();
 
             sleep($interval);
