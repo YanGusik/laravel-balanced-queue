@@ -153,4 +153,40 @@ class Metrics
 
         $this->redis->del("{$this->prefix}:{$queueKey}:partitions");
     }
+
+    /**
+     * Get all active queues by finding partition keys.
+     *
+     * @return array<string>
+     */
+    public function getAllQueues(): array
+    {
+        // Laravel's Redis connection auto-adds the prefix from config,
+        // so we only use our balanced-queue prefix in the pattern
+        $pattern = "{$this->prefix}:queues:*:partitions";
+        $queues = [];
+
+        // Use KEYS command to find all partition keys
+        $keys = $this->redis->keys($pattern);
+
+        if (! is_array($keys)) {
+            return [];
+        }
+
+        // Get Laravel's Redis prefix for stripping from returned keys
+        $laravelPrefix = config('database.redis.options.prefix', '');
+
+        foreach ($keys as $key) {
+            // Keys returned include Laravel prefix, strip it first
+            $keyWithoutLaravelPrefix = $laravelPrefix ? substr($key, strlen($laravelPrefix)) : $key;
+
+            // Extract queue name from: balanced-queue:queues:{queue}:partitions
+            $escapedPrefix = preg_quote($this->prefix, '/');
+            if (preg_match('/^' . $escapedPrefix . ':queues:(.+):partitions$/', $keyWithoutLaravelPrefix, $matches)) {
+                $queues[] = $matches[1];
+            }
+        }
+
+        return array_values(array_unique($queues));
+    }
 }

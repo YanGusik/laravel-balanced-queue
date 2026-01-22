@@ -156,4 +156,29 @@ return [
         // Key prefix for all balanced queue keys
         'prefix' => env('BALANCED_QUEUE_PREFIX', 'balanced-queue'),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Prometheus Metrics Endpoint
+    |--------------------------------------------------------------------------
+    |
+    | Configure the optional Prometheus metrics endpoint for monitoring.
+    | When enabled, metrics will be exposed at the configured route.
+    |
+    */
+    'prometheus' => [
+        // Enable or disable the Prometheus endpoint
+        'enabled' => env('BALANCED_QUEUE_PROMETHEUS_ENABLED', false),
+        // The route path for the metrics endpoint
+        'route' => env('BALANCED_QUEUE_PROMETHEUS_ROUTE', '/balanced-queue/metrics'),
+        // Middleware to apply: 'ip_whitelist', 'auth.basic', or null (no middleware)
+        'middleware' => env('BALANCED_QUEUE_PROMETHEUS_MIDDLEWARE', 'ip_whitelist'),
+        // IP addresses/ranges allowed when using 'ip_whitelist' middleware
+        'ip_whitelist' => [
+            '127.0.0.1',
+            '10.0.0.0/8',
+            '172.16.0.0/12',
+            '192.168.0.0/16',
+        ],
+    ],
 ];

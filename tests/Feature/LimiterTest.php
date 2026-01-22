@@ -27,9 +27,9 @@ class LimiterTest extends TestCase
     {
         $redis = $this->getMockRedis();
 
-        // Currently 2 active jobs (at limit)
-        $redis->shouldReceive('hlen')
-            ->with('balanced-queue:active:test:user:1')
+        // Mock eval returning 2 active jobs (at limit) after cleanup
+        $redis->shouldReceive('eval')
+            ->once()
             ->andReturn(2);
 
         $limiter = new SimpleGroupLimiter(maxConcurrent: 2);
@@ -42,9 +42,9 @@ class LimiterTest extends TestCase
     {
         $redis = $this->getMockRedis();
 
-        // Currently 1 active job (under limit)
-        $redis->shouldReceive('hlen')
-            ->with('balanced-queue:active:test:user:1')
+        // Mock eval returning 1 active job (under limit) after cleanup
+        $redis->shouldReceive('eval')
+            ->once()
             ->andReturn(1);
 
         $limiter = new SimpleGroupLimiter(maxConcurrent: 2);
@@ -107,9 +107,10 @@ class LimiterTest extends TestCase
             ->with('balanced-queue:metrics:test:global', 'utilization')
             ->andReturn('0.3'); // 30% utilization
 
-        $redis->shouldReceive('hlen')
-            ->with('balanced-queue:active:test:user:1')
-            ->andReturn(2); // Currently 2 active
+        // Mock eval returning 2 active jobs after cleanup
+        $redis->shouldReceive('eval')
+            ->once()
+            ->andReturn(2);
 
         $limiter = new AdaptiveLimiter(
             baseLimit: 2,
@@ -133,9 +134,10 @@ class LimiterTest extends TestCase
             ->with('balanced-queue:metrics:test:global', 'utilization')
             ->andReturn('0.9'); // 90% utilization
 
-        $redis->shouldReceive('hlen')
-            ->with('balanced-queue:active:test:user:1')
-            ->andReturn(2); // Currently at base limit
+        // Mock eval returning 2 active jobs after cleanup (at base limit)
+        $redis->shouldReceive('eval')
+            ->once()
+            ->andReturn(2);
 
         $limiter = new AdaptiveLimiter(
             baseLimit: 2,
