@@ -103,7 +103,9 @@ return [
             // Maximum concurrent jobs per partition
             'max_concurrent' => (int) env('BALANCED_QUEUE_MAX_CONCURRENT', 2),
             // TTL for active job locks (in seconds)
-            'lock_ttl' => 3600,
+            // IMPORTANT: Must be greater than queue's retry_after (config/queue.php)
+            // If lock_ttl < retry_after, crashed jobs may bypass concurrency limits
+            'lock_ttl' => (int) env('BALANCED_QUEUE_LOCK_TTL', 3600),
             'active_key_prefix' => 'balanced-queue:active',
         ],
 
@@ -114,7 +116,9 @@ return [
             // Maximum concurrent jobs per partition (when system is underutilized)
             'max_limit' => 5,
             // TTL for active job locks (in seconds)
-            'lock_ttl' => 3600,
+            // IMPORTANT: Must be greater than queue's retry_after (config/queue.php)
+            // If lock_ttl < retry_after, crashed jobs may bypass concurrency limits
+            'lock_ttl' => (int) env('BALANCED_QUEUE_LOCK_TTL', 3600),
             // Scale up when utilization is below this threshold
             'utilization_threshold' => 0.7,
             'active_key_prefix' => 'balanced-queue:active',
