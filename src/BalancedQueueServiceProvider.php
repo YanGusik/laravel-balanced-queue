@@ -98,9 +98,15 @@ class BalancedQueueServiceProvider extends ServiceProvider
         $route = config('balanced-queue.prometheus.route', '/balanced-queue/metrics');
         $middleware = $this->getPrometheusMiddleware();
 
+        // Prometheus format endpoint
         $router->get($route, [PrometheusController::class, 'metrics'])
             ->middleware($middleware)
             ->name('balanced-queue.prometheus.metrics');
+
+        // JSON format endpoint for Grafana Infinity
+        $router->get($route . '/json', [PrometheusController::class, 'json'])
+            ->middleware($middleware)
+            ->name('balanced-queue.prometheus.json');
     }
 
     /**
