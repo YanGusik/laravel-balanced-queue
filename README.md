@@ -569,6 +569,105 @@ If all partitions show `Active = max_concurrent`, workers are waiting for slots 
 
 ---
 
+## Monitoring with Prometheus & Grafana
+
+The package provides optional HTTP endpoints for monitoring integration.
+
+### Enable Monitoring Endpoints
+
+```env
+BALANCED_QUEUE_PROMETHEUS_ENABLED=true
+BALANCED_QUEUE_PROMETHEUS_ROUTE=/balanced-queue/metrics
+BALANCED_QUEUE_PROMETHEUS_MIDDLEWARE=ip_whitelist
+```
+
+### Available Endpoints
+
+| Endpoint | Format | Description |
+|----------|--------|-------------|
+| `/balanced-queue/metrics` | Prometheus | Metrics in Prometheus text format |
+| `/balanced-queue/metrics/json` | JSON | Metrics for Grafana Infinity plugin |
+
+### Security
+
+By default, endpoints are protected with IP whitelist middleware. Configure allowed IPs in `config/balanced-queue.php`:
+
+```php
+'prometheus' => [
+    'enabled' => true,
+    'middleware' => 'ip_whitelist', // or 'auth.basic', or null
+    'ip_whitelist' => [
+        '127.0.0.1',
+        '10.0.0.0/8',      // Private networks
+        '172.16.0.0/12',
+        '192.168.0.0/16',
+    ],
+],
+```
+
+### Prometheus Setup
+
+1. Add scrape config to `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'balanced-queue'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['your-app.com']
+    metrics_path: /balanced-queue/metrics
+```
+
+2. Available metrics:
+
+```
+balanced_queue_pending_jobs{queue="default"} 84
+balanced_queue_active_jobs{queue="default"} 4
+balanced_queue_processed_total{queue="default"} 1250
+balanced_queue_partitions_total{queue="default"} 15
+```
+
+### Grafana with Infinity Plugin (Real-time without Prometheus)
+
+For real-time monitoring without Prometheus server, use [Grafana Infinity datasource](https://grafana.com/grafana/plugins/yesoreyeram-infinity-datasource/):
+
+1. Install Infinity plugin in Grafana
+2. Create datasource pointing to your app
+3. Use the JSON endpoint:
+
+```
+GET /balanced-queue/metrics/json
+
+Response:
+{
+  "timestamp": "2024-01-15T10:30:00+00:00",
+  "queues": [
+    {
+      "queue": "default",
+      "pending": 84,
+      "active": 4,
+      "processed": 1250,
+      "partition_count": 3,
+      "partitions": [
+        {"partition": "user:123", "pending": 50, "active": 2, "processed": 800},
+        {"partition": "user:456", "pending": 20, "active": 1, "processed": 300},
+        {"partition": "user:789", "pending": 14, "active": 1, "processed": 150}
+      ]
+    }
+  ]
+}
+```
+
+4. Configure Infinity datasource query:
+   - Type: JSON
+   - URL: `https://your-app.com/balanced-queue/metrics/json`
+   - Parser: Backend
+
+5. For queue summary table: Rows/Root: `queues`
+6. For partition details: Rows/Root: `queues[0].partitions` (or use JSONata for all partitions)
+
+---
+
 ## Testing
 
 ```bash
