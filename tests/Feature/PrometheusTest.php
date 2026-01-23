@@ -59,12 +59,17 @@ class PrometheusTest extends TestCase
         $this->assertStringContainsString('# HELP balanced_queue_partitions_total', $output);
         $this->assertStringContainsString('# TYPE balanced_queue_partitions_total gauge', $output);
 
-        // Check metric values
-        $this->assertStringContainsString('balanced_queue_pending_jobs{queue="default",partition="user:1"} 5', $output);
-        $this->assertStringContainsString('balanced_queue_active_jobs{queue="default",partition="user:1"} 2', $output);
-        $this->assertStringContainsString('balanced_queue_processed_total{queue="default",partition="user:1"} 100', $output);
+        // Check aggregated metric values (by queue, not partition)
+        $this->assertStringContainsString('balanced_queue_pending_jobs{queue="default"} 8', $output);  // 5+3
+        $this->assertStringContainsString('balanced_queue_active_jobs{queue="default"} 3', $output);   // 2+1
+        $this->assertStringContainsString('balanced_queue_processed_total{queue="default"} 150', $output); // 100+50
         $this->assertStringContainsString('balanced_queue_partitions_total{queue="default"} 2', $output);
+        $this->assertStringContainsString('balanced_queue_pending_jobs{queue="emails"} 10', $output);
         $this->assertStringContainsString('balanced_queue_partitions_total{queue="emails"} 1', $output);
+
+        // Ensure partition-level metrics are NOT included (cardinality safety)
+        $this->assertStringNotContainsString('partition="user:1"', $output);
+        $this->assertStringNotContainsString('partition="user:2"', $output);
     }
 
     public function test_export_handles_empty_queues(): void
@@ -89,13 +94,13 @@ class PrometheusTest extends TestCase
 
         $metrics->shouldReceive('getAllQueues')
             ->once()
-            ->andReturn(['default']);
+            ->andReturn(['queue-"test"']);
 
         $metrics->shouldReceive('getQueueStats')
-            ->with('default')
+            ->with('queue-"test"')
             ->once()
             ->andReturn([
-                'user:"test"' => [
+                'partition1' => [
                     'queued' => 1,
                     'active' => 0,
                     'metrics' => [],
@@ -105,8 +110,8 @@ class PrometheusTest extends TestCase
         $exporter = new PrometheusExporter($metrics);
         $output = $exporter->export();
 
-        // Check that quotes are escaped
-        $this->assertStringContainsString('partition="user:\\"test\\""', $output);
+        // Check that quotes are escaped in queue name
+        $this->assertStringContainsString('queue="queue-\\"test\\""', $output);
     }
 
     protected function tearDown(): void

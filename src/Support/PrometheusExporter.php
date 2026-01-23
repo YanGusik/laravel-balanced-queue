@@ -18,30 +18,14 @@ class PrometheusExporter
 
     /**
      * Export all metrics in Prometheus format.
+     *
+     * Metrics are aggregated by queue to avoid cardinality explosion
+     * (partition-level metrics would grow O(N) with users).
      */
     public function export(): string
     {
         $queues = $this->metrics->getAllQueues();
-        $lines = [];
 
-        // Add metric type headers once
-        $lines[] = '# HELP balanced_queue_pending_jobs Number of pending jobs';
-        $lines[] = '# TYPE balanced_queue_pending_jobs gauge';
-        $lines[] = '';
-
-        $lines[] = '# HELP balanced_queue_active_jobs Number of currently active jobs';
-        $lines[] = '# TYPE balanced_queue_active_jobs gauge';
-        $lines[] = '';
-
-        $lines[] = '# HELP balanced_queue_processed_total Total number of processed jobs';
-        $lines[] = '# TYPE balanced_queue_processed_total counter';
-        $lines[] = '';
-
-        $lines[] = '# HELP balanced_queue_partitions_total Number of active partitions';
-        $lines[] = '# TYPE balanced_queue_partitions_total gauge';
-        $lines[] = '';
-
-        // Collect all metrics
         $pendingMetrics = [];
         $activeMetrics = [];
         $processedMetrics = [];
@@ -49,42 +33,26 @@ class PrometheusExporter
 
         foreach ($queues as $queue) {
             $stats = $this->metrics->getQueueStats($queue);
+
+            $totalPending = 0;
+            $totalActive = 0;
+            $totalProcessed = 0;
             $partitionCount = count($stats);
 
-            $partitionMetrics[] = $this->formatMetric(
-                'balanced_queue_partitions_total',
-                $partitionCount,
-                ['queue' => $queue]
-            );
-
-            foreach ($stats as $partition => $partitionStats) {
-                $labels = [
-                    'queue' => $queue,
-                    'partition' => $partition,
-                ];
-
-                $pendingMetrics[] = $this->formatMetric(
-                    'balanced_queue_pending_jobs',
-                    $partitionStats['queued'],
-                    $labels
-                );
-
-                $activeMetrics[] = $this->formatMetric(
-                    'balanced_queue_active_jobs',
-                    $partitionStats['active'],
-                    $labels
-                );
-
-                $processed = (int) ($partitionStats['metrics']['total_popped'] ?? 0);
-                $processedMetrics[] = $this->formatMetric(
-                    'balanced_queue_processed_total',
-                    $processed,
-                    $labels
-                );
+            foreach ($stats as $partitionStats) {
+                $totalPending += $partitionStats['queued'];
+                $totalActive += $partitionStats['active'];
+                $totalProcessed += (int) ($partitionStats['metrics']['total_popped'] ?? 0);
             }
+
+            $labels = ['queue' => $queue];
+
+            $pendingMetrics[] = $this->formatMetric('balanced_queue_pending_jobs', $totalPending, $labels);
+            $activeMetrics[] = $this->formatMetric('balanced_queue_active_jobs', $totalActive, $labels);
+            $processedMetrics[] = $this->formatMetric('balanced_queue_processed_total', $totalProcessed, $labels);
+            $partitionMetrics[] = $this->formatMetric('balanced_queue_partitions_total', $partitionCount, $labels);
         }
 
-        // Output metrics grouped by type
         $lines = array_merge(
             ['# HELP balanced_queue_pending_jobs Number of pending jobs'],
             ['# TYPE balanced_queue_pending_jobs gauge'],
