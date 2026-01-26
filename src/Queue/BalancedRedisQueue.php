@@ -263,6 +263,26 @@ class BalancedRedisQueue extends RedisQueue
      */
     protected function resolvePartition($job): string
     {
+        if (isset($job->partitionKey)) {
+            return $job->partitionKey;
+        }
+
+        if (property_exists($job, 'userId')) {
+            return (string)$job->userId;
+        }
+
+        if (property_exists($job, 'user_id')) {
+            return (string)$job->user_id;
+        }
+
+        if (property_exists($job, 'tenantId')) {
+            return (string)$job->tenantId;
+        }
+
+        if (property_exists($job, 'tenant_id')) {
+            return (string)$job->tenant_id;
+        }
+
         if (method_exists($job, 'getPartitionKey')) {
             return (string) $job->getPartitionKey();
         }
