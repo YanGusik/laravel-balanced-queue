@@ -25,7 +25,7 @@ class BalancedQueueClearCommand extends Command
         $partition = $this->option('partition');
         $force = $this->option('force');
 
-        $redis = Redis::connection();
+        $redis = Redis::connection(config('balanced-queue.redis.connection'));
         $queueKey = "queues:{$queue}";
 
         if ($partition) {
