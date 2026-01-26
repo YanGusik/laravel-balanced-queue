@@ -125,7 +125,7 @@ class BalancedRedisQueue extends RedisQueue
     /**
      * Pop the next job from the queue.
      */
-    public function pop($queue = null): ?Job
+    public function pop($queue = null, $index = 0): ?Job
     {
         $queue = $this->getQueue($queue);
         $redis = $this->getConnection();
