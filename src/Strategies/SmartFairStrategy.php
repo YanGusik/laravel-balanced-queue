@@ -92,7 +92,7 @@ class SmartFairStrategy implements PartitionStrategy
                 $score *= $this->boostMultiplier;
             }
 
-            $scores[$partition] = $score;
+            $scores[(string) $partition] = $score;
         }
 
         if (empty($scores)) {
@@ -102,7 +102,7 @@ class SmartFairStrategy implements PartitionStrategy
         // Select partition with highest score
         arsort($scores);
 
-        return array_key_first($scores);
+        return (string) array_key_first($scores);
     }
 
     public function getName(): string
