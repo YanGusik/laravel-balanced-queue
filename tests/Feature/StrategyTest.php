@@ -157,6 +157,34 @@ class StrategyTest extends TestCase
         $this->assertEquals('user:active', $result);
     }
 
+    public function test_smart_strategy_returns_string_for_numeric_partition_keys(): void
+    {
+        $redis = $this->getMockRedis();
+
+        // Numeric partition keys (e.g., account IDs)
+        $redis->shouldReceive('smembers')
+            ->with('balanced-queue:test:partitions')
+            ->andReturn(['123', '456', '789']);
+
+        $redis->shouldReceive('llen')
+            ->with('balanced-queue:test:123')
+            ->andReturn(5);
+        $redis->shouldReceive('llen')
+            ->with('balanced-queue:test:456')
+            ->andReturn(0);
+        $redis->shouldReceive('llen')
+            ->with('balanced-queue:test:789')
+            ->andReturn(0);
+
+        $redis->shouldReceive('hget')->andReturn(null);
+
+        $strategy = new SmartFairStrategy();
+        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:test:partitions');
+
+        $this->assertIsString($result);
+        $this->assertEquals('123', $result);
+    }
+
     public function test_strategy_name(): void
     {
         $this->assertEquals('random', (new RandomStrategy())->getName());
