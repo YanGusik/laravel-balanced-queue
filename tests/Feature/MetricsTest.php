@@ -14,23 +14,17 @@ class MetricsTest extends TestCase
     {
         $redis = $this->getMockRedis();
 
-        // First scan returns some keys, cursor moves
-        $redis->shouldReceive('scan')
-            ->once()
-            ->with('0', ['match' => 'balanced-queue:queues:*:partitions', 'count' => 100])
-            ->andReturn(['5', [
-                'balanced-queue:queues:default:partitions',
-                'balanced-queue:queues:emails:partitions',
-            ]]);
+        // Redis keys() returns keys WITH Laravel prefix
+        $laravelPrefix = config('database.redis.options.prefix', '');
 
-        // Second scan returns more keys, cursor back to 0
-        $redis->shouldReceive('scan')
+        $redis->shouldReceive('keys')
             ->once()
-            ->with('5', ['match' => 'balanced-queue:queues:*:partitions', 'count' => 100])
-            ->andReturn(['0', [
-                'balanced-queue:queues:notifications:partitions',
-                'balanced-queue:queues:default:partitions', // duplicate
-            ]]);
+            ->with('balanced-queue:queues:*:partitions')
+            ->andReturn([
+                $laravelPrefix.'balanced-queue:queues:default:partitions',
+                $laravelPrefix.'balanced-queue:queues:emails:partitions',
+                $laravelPrefix.'balanced-queue:queues:notifications:partitions',
+            ]);
 
         $metrics = new Metrics($redis, 'balanced-queue');
         $queues = $metrics->getAllQueues();
@@ -45,10 +39,10 @@ class MetricsTest extends TestCase
     {
         $redis = $this->getMockRedis();
 
-        $redis->shouldReceive('scan')
+        $redis->shouldReceive('keys')
             ->once()
-            ->with('0', ['match' => 'balanced-queue:queues:*:partitions', 'count' => 100])
-            ->andReturn(['0', []]);
+            ->with('balanced-queue:queues:*:partitions')
+            ->andReturn([]);
 
         $metrics = new Metrics($redis, 'balanced-queue');
         $queues = $metrics->getAllQueues();
@@ -56,12 +50,13 @@ class MetricsTest extends TestCase
         $this->assertEmpty($queues);
     }
 
-    public function test_get_all_queues_handles_scan_failure(): void
+    public function test_get_all_queues_handles_keys_failure(): void
     {
         $redis = $this->getMockRedis();
 
-        $redis->shouldReceive('scan')
+        $redis->shouldReceive('keys')
             ->once()
+            ->with('balanced-queue:queues:*:partitions')
             ->andReturn(false);
 
         $metrics = new Metrics($redis, 'balanced-queue');

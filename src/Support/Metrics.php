@@ -17,7 +17,7 @@ class Metrics
 
     public function __construct(?Connection $redis = null, string $prefix = 'balanced-queue')
     {
-        $this->redis = $redis ?? Redis::connection();
+        $this->redis = $redis ?? Redis::connection(config('balanced-queue.redis.connection'));
         $this->prefix = $prefix;
     }
 
