@@ -39,7 +39,7 @@ jobs:
           composer update --prefer-dist --no-interaction
 
       - name: Run unit tests
-        run: vendor/bin/phpunit --testsuite=Feature,Unit
+        run: vendor/bin/phpunit --testsuite=Feature,Unit --no-coverage
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -75,4 +75,4 @@ jobs:
           REDIS_INTEGRATION: 1
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
-        run: vendor/bin/phpunit --testsuite=Integration
+        run: vendor/bin/phpunit --testsuite=Integration --no-coverage
