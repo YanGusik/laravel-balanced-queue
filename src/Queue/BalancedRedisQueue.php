@@ -263,34 +263,28 @@ class BalancedRedisQueue extends RedisQueue
      */
     protected function resolvePartition($job): string
     {
+        // 1. Explicitly set via onPartition()
         if (isset($job->partitionKey)) {
-            return $job->partitionKey;
+            return (string) $job->partitionKey;
         }
-
-        if (property_exists($job, 'userId')) {
-            return (string)$job->userId;
-        }
-
-        if (property_exists($job, 'user_id')) {
-            return (string)$job->user_id;
-        }
-
-        if (property_exists($job, 'tenantId')) {
-            return (string)$job->tenantId;
-        }
-
-        if (property_exists($job, 'tenant_id')) {
-            return (string)$job->tenant_id;
-        }
-
+    
+        // 2. Overridden in job class (now works correctly without trait method!)
         if (method_exists($job, 'getPartitionKey')) {
             return (string) $job->getPartitionKey();
         }
-
+    
+        // 3. Global resolver from config
         if (isset($this->partitionResolver)) {
             return (string) ($this->partitionResolver)($job);
         }
-
+    
+        // 4. Auto-detect from common properties
+        foreach (['userId', 'user_id', 'tenantId', 'tenant_id'] as $prop) {
+            if (property_exists($job, $prop) && $job->$prop !== null) {
+                return (string) $job->$prop;
+            }
+        }
+    
         return 'default';
     }
 
