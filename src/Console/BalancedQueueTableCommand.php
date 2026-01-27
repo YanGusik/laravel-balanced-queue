@@ -53,7 +53,7 @@ class BalancedQueueTableCommand extends Command
      */
     protected function getAllQueues(): array
     {
-        $metrics = new Metrics(null, $this->prefix);
+        $metrics = new Metrics(Redis::connection(config('balanced-queue.redis.connection')), $this->prefix);
 
         return $metrics->getAllQueues();
     }
@@ -115,7 +115,7 @@ class BalancedQueueTableCommand extends Command
 
     protected function displayTable(string $queue): void
     {
-        $redis = Redis::connection();
+        $redis = Redis::connection(config('balanced-queue.redis.connection'));
         $queueKey = "queues:{$queue}";
 
         // Get all partitions
