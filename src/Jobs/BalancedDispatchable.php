@@ -39,7 +39,7 @@ trait BalancedDispatchable
     /**
      * The partition key for this job.
      */
-    protected ?string $partitionKey = null;
+    public ?string $partitionKey = null;
 
     /**
      * Set the partition key for this job.
