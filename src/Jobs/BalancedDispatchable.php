@@ -39,7 +39,7 @@ trait BalancedDispatchable
     /**
      * The partition key for this job.
      */
-    protected ?string $partitionKey = null;
+    public ?string $partitionKey = null;
 
     /**
      * Set the partition key for this job.
@@ -49,38 +49,5 @@ trait BalancedDispatchable
         $this->partitionKey = (string) $partition;
 
         return $this;
-    }
-
-    /**
-     * Get the partition key for this job.
-     *
-     * Override this method to provide custom partition logic,
-     * or use onPartition() when dispatching.
-     */
-    public function getPartitionKey(): string
-    {
-        // If explicitly set via onPartition()
-        if ($this->partitionKey !== null) {
-            return $this->partitionKey;
-        }
-
-        // Try common property names
-        if (property_exists($this, 'userId')) {
-            return (string) $this->userId;
-        }
-
-        if (property_exists($this, 'user_id')) {
-            return (string) $this->user_id;
-        }
-
-        if (property_exists($this, 'tenantId')) {
-            return (string) $this->tenantId;
-        }
-
-        if (property_exists($this, 'tenant_id')) {
-            return (string) $this->tenant_id;
-        }
-
-        return 'default';
     }
 }
