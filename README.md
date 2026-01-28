@@ -390,6 +390,24 @@ Set a default resolver in config for all jobs:
 },
 ```
 
+### Partition Resolution Priority
+
+When determining the partition key, the following order is used:
+
+| Priority | Method | Description |
+|----------|--------|-------------|
+| 1 | `onPartition()` | Explicitly set when dispatching |
+| 2 | `getPartitionKey()` | Custom method defined in your job class |
+| 3 | `partition_resolver` | Global resolver from config |
+| 4 | Auto-detection | Properties: `userId`, `user_id`, `tenantId`, `tenant_id` |
+| 5 | `'default'` | Fallback partition |
+
+The first non-null value wins. This allows you to:
+- Override everything with `onPartition()` at dispatch time
+- Define custom logic per job with `getPartitionKey()`
+- Set a global default with `partition_resolver` in config
+- Rely on automatic detection for simple cases
+
 ---
 
 ## Advanced Usage
