@@ -224,10 +224,10 @@ Add a supervisor for balanced queue in `config/horizon.php`:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Job execution | Works | Jobs execute normally through Horizon workers |
-| Completed jobs list | Works | Shows in Horizon dashboard after completion |
 | Failed jobs list | Works | Failed jobs appear in Horizon |
 | Worker metrics | Works | CPU, memory, throughput visible |
 | **Pending jobs count** | **Doesn't work** | Horizon shows 0 pending |
+| **Completed jobs list** | **Doesn't work** | Use Prometheus/Grafana for metrics |
 | **horizon:clear** | **Doesn't work** | Use `balanced-queue:clear` instead |
 
 **Why?** Balanced Queue uses a different Redis key structure (partitioned queues) than standard Laravel queues. Horizon expects jobs in `queues:{name}` but we store them in `balanced-queue:{queue}:{partition}`.
