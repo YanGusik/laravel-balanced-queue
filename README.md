@@ -227,10 +227,45 @@ Add a supervisor for balanced queue in `config/horizon.php`:
 | Failed jobs list | Works | Failed jobs appear in Horizon |
 | Worker metrics | Works | CPU, memory, throughput visible |
 | **Pending jobs count** | **Doesn't work** | Horizon shows 0 pending |
-| **Completed jobs list** | **Doesn't work** | Use Prometheus/Grafana for metrics |
+| **Completed jobs list** | **Experimental** | Enable with `horizon.enabled` config |
+| **Recent jobs list** | **Experimental** | Enable with `horizon.enabled` config |
 | **horizon:clear** | **Doesn't work** | Use `balanced-queue:clear` instead |
 
-**Why?** Balanced Queue uses a different Redis key structure (partitioned queues) than standard Laravel queues. Horizon expects jobs in `queues:{name}` but we store them in `balanced-queue:{queue}:{partition}`.
+**Why?** Balanced Queue uses a different Redis key structure (partitioned queues) than standard Laravel queues. Horizon expects jobs in `queues:{name}` but we store them in `balanced-queue:queues:{name}:{partition}`.
+
+### Experimental: Horizon Dashboard Integration
+
+You can enable experimental Horizon events integration to see completed/recent jobs in the Horizon dashboard:
+
+```php
+// config/balanced-queue.php
+'horizon' => [
+    'enabled' => 'auto',  // 'auto', true, or false
+],
+```
+
+| Value | Behavior |
+|-------|----------|
+| `'auto'` | Enable if `laravel/horizon` is installed (default) |
+| `true` | Always enable (requires Horizon) |
+| `false` | Disable Horizon events |
+
+Or via environment variable:
+
+```env
+BALANCED_QUEUE_HORIZON_ENABLED=auto
+```
+
+**Warning:** This feature is experimental and adds a small overhead per job (writing to Horizon's Redis keys). Test thoroughly in your environment before using in production.
+
+**What this enables:**
+- Completed jobs appear in Horizon dashboard
+- Recent jobs list works
+- Job metrics (throughput, runtime) are tracked
+
+**What still doesn't work:**
+- Pending jobs count (architectural limitation)
+- `horizon:clear` command (use `balanced-queue:clear`)
 
 ### Monitoring Commands
 

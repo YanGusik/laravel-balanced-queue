@@ -24,6 +24,7 @@ class SmartFairStrategy implements PartitionStrategy
     protected bool $boostSmallQueues;
     protected int $smallQueueThreshold;
     protected float $boostMultiplier;
+    protected string $prefix;
     protected string $metricsKeyPrefix;
 
     public function __construct(
@@ -32,6 +33,7 @@ class SmartFairStrategy implements PartitionStrategy
         bool $boostSmallQueues = true,
         int $smallQueueThreshold = 5,
         float $boostMultiplier = 1.5,
+        string $prefix = 'balanced-queue',
         string $metricsKeyPrefix = 'balanced-queue:metrics'
     ) {
         $this->weightWaitTime = $weightWaitTime;
@@ -39,10 +41,11 @@ class SmartFairStrategy implements PartitionStrategy
         $this->boostSmallQueues = $boostSmallQueues;
         $this->smallQueueThreshold = $smallQueueThreshold;
         $this->boostMultiplier = $boostMultiplier;
+        $this->prefix = $prefix;
         $this->metricsKeyPrefix = $metricsKeyPrefix;
     }
 
-    public function selectPartition(Connection $redis, string $queue, string $partitionsKey): ?string
+    public function selectPartition(Connection $redis, string $queueName, string $partitionsKey): ?string
     {
         $partitions = $redis->smembers($partitionsKey);
 
@@ -56,8 +59,8 @@ class SmartFairStrategy implements PartitionStrategy
 
         // First pass: collect data and find max queue size
         foreach ($partitions as $partition) {
-            $queueKey = "balanced-queue:{$queue}:{$partition}";
-            $metricsKey = "{$this->metricsKeyPrefix}:{$queue}:{$partition}";
+            $queueKey = $this->getPartitionQueueKey($queueName, $partition);
+            $metricsKey = $this->getMetricsKey($queueName, $partition);
 
             $queueSize = (int) $redis->llen($queueKey);
             $firstJobTime = $redis->hget($metricsKey, 'first_job_time');
@@ -108,5 +111,19 @@ class SmartFairStrategy implements PartitionStrategy
     public function getName(): string
     {
         return 'smart';
+    }
+
+    // =========================================================================
+    // Redis Key Helpers (mirrors BalancedRedisQueue)
+    // =========================================================================
+
+    protected function getPartitionQueueKey(string $queueName, string $partition): string
+    {
+        return "{$this->prefix}:queues:{$queueName}:{$partition}";
+    }
+
+    protected function getMetricsKey(string $queueName, string $partition): string
+    {
+        return "{$this->metricsKeyPrefix}:{$queueName}:{$partition}";
     }
 }
