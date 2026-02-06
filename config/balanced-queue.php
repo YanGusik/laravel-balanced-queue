@@ -144,6 +144,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Horizon Integration (Experimental)
+    |--------------------------------------------------------------------------
+    |
+    | WARNING: This feature is experimental and may have performance impact
+    | on high-throughput systems. Test thoroughly before using in production.
+    |
+    | When enabled, balanced queue will fire Horizon events so jobs appear
+    | in the Horizon dashboard (pending, completed, recent jobs).
+    |
+    | Options:
+    | - true: Always fire Horizon events (requires laravel/horizon)
+    | - false: Never fire Horizon events
+    | - 'auto': Fire events only if Horizon is installed (default)
+    |
+    | Detection: Uses class_exists(\Laravel\Horizon\Horizon::class)
+    |
+    */
+    'horizon' => [
+        'enabled' => env('BALANCED_QUEUE_HORIZON_ENABLED', 'auto'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Redis Configuration
     |--------------------------------------------------------------------------
     |

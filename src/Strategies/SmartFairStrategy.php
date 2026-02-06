@@ -6,6 +6,7 @@ namespace YanGusik\BalancedQueue\Strategies;
 
 use Illuminate\Contracts\Redis\Connection;
 use YanGusik\BalancedQueue\Contracts\PartitionStrategy;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 /**
  * Smart fair partition selection strategy.
@@ -24,7 +25,7 @@ class SmartFairStrategy implements PartitionStrategy
     protected bool $boostSmallQueues;
     protected int $smallQueueThreshold;
     protected float $boostMultiplier;
-    protected string $metricsKeyPrefix;
+    protected RedisKeys $keys;
 
     public function __construct(
         float $weightWaitTime = 0.6,
@@ -32,17 +33,17 @@ class SmartFairStrategy implements PartitionStrategy
         bool $boostSmallQueues = true,
         int $smallQueueThreshold = 5,
         float $boostMultiplier = 1.5,
-        string $metricsKeyPrefix = 'balanced-queue:metrics'
+        string $prefix = 'balanced-queue'
     ) {
         $this->weightWaitTime = $weightWaitTime;
         $this->weightQueueSize = $weightQueueSize;
         $this->boostSmallQueues = $boostSmallQueues;
         $this->smallQueueThreshold = $smallQueueThreshold;
         $this->boostMultiplier = $boostMultiplier;
-        $this->metricsKeyPrefix = $metricsKeyPrefix;
+        $this->keys = new RedisKeys($prefix);
     }
 
-    public function selectPartition(Connection $redis, string $queue, string $partitionsKey): ?string
+    public function selectPartition(Connection $redis, string $queueName, string $partitionsKey): ?string
     {
         $partitions = $redis->smembers($partitionsKey);
 
@@ -56,8 +57,8 @@ class SmartFairStrategy implements PartitionStrategy
 
         // First pass: collect data and find max queue size
         foreach ($partitions as $partition) {
-            $queueKey = "balanced-queue:{$queue}:{$partition}";
-            $metricsKey = "{$this->metricsKeyPrefix}:{$queue}:{$partition}";
+            $queueKey = $this->keys->partitionQueue($queueName, $partition);
+            $metricsKey = $this->keys->metrics($queueName, $partition);
 
             $queueSize = (int) $redis->llen($queueKey);
             $firstJobTime = $redis->hget($metricsKey, 'first_job_time');

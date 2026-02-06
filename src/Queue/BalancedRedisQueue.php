@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace YanGusik\BalancedQueue\Queue;
 
+use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Contracts\Redis\Factory as RedisFactory;
-use Illuminate\Queue\Jobs\RedisJob;
 use Illuminate\Queue\RedisQueue;
 use Illuminate\Support\Str;
 use YanGusik\BalancedQueue\Contracts\ConcurrencyLimiter;
 use YanGusik\BalancedQueue\Contracts\PartitionStrategy;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 /**
  * Balanced Redis Queue implementation.
@@ -22,8 +23,20 @@ class BalancedRedisQueue extends RedisQueue
 {
     protected PartitionStrategy $strategy;
     protected ConcurrencyLimiter $limiter;
-    protected string $prefix;
+    protected RedisKeys $keys;
     protected \Closure $partitionResolver;
+
+    /**
+     * The job that was last pushed (for Horizon integration).
+     *
+     * @var object|string|null
+     */
+    protected $lastPushed;
+
+    /**
+     * Whether Horizon integration is enabled (cached).
+     */
+    protected ?bool $horizonEnabled = null;
 
     public function __construct(
         RedisFactory $redis,
@@ -62,9 +75,17 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function setPrefix(string $prefix): self
     {
-        $this->prefix = $prefix;
+        $this->keys = new RedisKeys($prefix);
 
         return $this;
+    }
+
+    /**
+     * Get the Redis keys helper.
+     */
+    public function getKeys(): RedisKeys
+    {
+        return $this->keys;
     }
 
     /**
@@ -78,14 +99,28 @@ class BalancedRedisQueue extends RedisQueue
     }
 
     /**
+     * Get clean queue name (without 'queues:' prefix).
+     *
+     * This normalizes the queue name for consistent usage throughout the class.
+     * Laravel's base getQueue() adds 'queues:' prefix, but we want clean names.
+     */
+    protected function getCleanQueueName(?string $queue): string
+    {
+        return $queue ?: $this->default;
+    }
+
+    /**
      * Push a job onto the queue with partition support.
      */
     public function push($job, $data = '', $queue = null): mixed
     {
-        $queue = $this->getQueue($queue);
+        $queueName = $this->getCleanQueueName($queue);
         $partition = $this->resolvePartition($job);
 
-        return $this->pushToPartition($queue, $partition, $this->createPayload($job, $queue, $data));
+        // Store for Horizon integration
+        $this->lastPushed = $job;
+
+        return $this->pushToPartition($queueName, $partition, $this->createPayload($job, $this->getQueue($queue), $data));
     }
 
     /**
@@ -93,24 +128,39 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function pushRaw($payload, $queue = null, array $options = []): mixed
     {
-        $queue = $this->getQueue($queue);
+        $queueName = $this->getCleanQueueName($queue);
         $partition = $options['partition'] ?? 'default';
 
-        return $this->pushToPartition($queue, $partition, $payload);
+        // For raw push, we don't have the job object
+        $this->lastPushed = null;
+
+        return $this->pushToPartition($queueName, $partition, $payload);
     }
 
     /**
      * Push a job to a specific partition.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $payload Job payload
      */
-    protected function pushToPartition(string $queue, string $partition, string $payload): mixed
+    protected function pushToPartition(string $queueName, string $partition, string $payload): mixed
     {
+        // Prepare payload for Horizon (adds tags, type, pushedAt, etc.)
+        $payload = $this->preparePayloadForHorizon($payload, $this->lastPushed);
+
+        // Fire Horizon JobPending event (before push)
+        if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobPending::class)) {
+            $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobPending($payload));
+        }
+
         $redis = $this->getConnection();
 
-        $partitionsKey = $this->getPartitionsKey($queue);
-        $queueKey = $this->getPartitionQueueKey($queue, $partition);
-        $metricsKey = $this->getMetricsKey($queue, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
 
-        return $redis->eval(
+        $result = $redis->eval(
             LuaScripts::push(),
             3,
             $partitionsKey,
@@ -120,6 +170,16 @@ class BalancedRedisQueue extends RedisQueue
             $partition,
             time()
         );
+
+        // Fire Horizon JobPushed event (after push)
+        if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobPushed::class)) {
+            $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobPushed($payload));
+        }
+
+        // Clear lastPushed
+        $this->lastPushed = null;
+
+        return $result;
     }
 
     /**
@@ -127,32 +187,35 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function pop($queue = null, $index = 0): ?Job
     {
-        $queue = $this->getQueue($queue);
+        $queueName = $this->getCleanQueueName($queue);
         $redis = $this->getConnection();
 
         // Select partition using strategy
-        $partitionsKey = $this->getPartitionsKey($queue);
-        $partition = $this->strategy->selectPartition($redis, $queue, $partitionsKey);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $partition = $this->strategy->selectPartition($redis, $queueName, $partitionsKey);
 
         if ($partition === null) {
             return null;
         }
 
         // Try to pop a job with concurrency limit
-        return $this->popFromPartition($queue, $partition);
+        return $this->popFromPartition($queueName, $partition);
     }
 
     /**
      * Pop a job from a specific partition.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
      */
-    protected function popFromPartition(string $queue, string $partition): ?Job
+    protected function popFromPartition(string $queueName, string $partition): ?Job
     {
         $redis = $this->getConnection();
 
-        $queueKey = $this->getPartitionQueueKey($queue, $partition);
-        $partitionsKey = $this->getPartitionsKey($queue);
-        $activeKey = $this->getActiveKey($queue, $partition);
-        $metricsKey = $this->getMetricsKey($queue, $partition);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $activeKey = $this->keys->active($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
 
         // Check if we can process based on concurrency limit
         $activeCount = (int) $redis->hlen($activeKey);
@@ -160,7 +223,7 @@ class BalancedRedisQueue extends RedisQueue
 
         if ($activeCount >= $maxConcurrent) {
             // Try another partition
-            return $this->tryNextPartition($queue, $partition);
+            return $this->tryNextPartition($queueName, $partition);
         }
 
         $jobId = Str::uuid()->toString();
@@ -180,8 +243,13 @@ class BalancedRedisQueue extends RedisQueue
             time()
         );
 
-        if (!$payload) {
+        if (! $payload) {
             return null;
+        }
+
+        // Fire Horizon JobReserved event
+        if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobReserved::class)) {
+            $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobReserved($payload));
         }
 
         return new BalancedRedisJob(
@@ -190,7 +258,7 @@ class BalancedRedisQueue extends RedisQueue
             $payload,
             $payload, // reserved is same as payload for balanced queue
             $this->connectionName,
-            $queue,
+            $queueName,
             $partition,
             $jobId
         );
@@ -198,22 +266,25 @@ class BalancedRedisQueue extends RedisQueue
 
     /**
      * Try to get a job from another partition when current is at capacity.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $excludePartition Partition to exclude
      */
-    protected function tryNextPartition(string $queue, string $excludePartition): ?Job
+    protected function tryNextPartition(string $queueName, string $excludePartition): ?Job
     {
         $redis = $this->getConnection();
-        $partitionsKey = $this->getPartitionsKey($queue);
+        $partitionsKey = $this->keys->partitions($queueName);
         $maxConcurrent = $this->getLimiterMaxConcurrent();
 
         $partitions = $redis->smembers($partitionsKey);
         $partitions = array_diff($partitions, [$excludePartition]);
 
         foreach ($partitions as $partition) {
-            $activeKey = $this->getActiveKey($queue, $partition);
+            $activeKey = $this->keys->active($queueName, $partition);
             $activeCount = (int) $redis->hlen($activeKey);
 
             if ($activeCount < $maxConcurrent) {
-                $job = $this->popFromPartition($queue, $partition);
+                $job = $this->popFromPartition($queueName, $partition);
                 if ($job !== null) {
                     return $job;
                 }
@@ -225,37 +296,88 @@ class BalancedRedisQueue extends RedisQueue
 
     /**
      * Release a job back to the queue.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $jobId Job ID
+     * @param string $payload Job payload
+     * @param int $delay Delay in seconds
+     * @param BalancedRedisJob|null $job Job instance for Horizon events
      */
-    public function releasePartitionJob(string $queue, string $partition, string $jobId, string $payload, int $delay = 0): void
+    public function releasePartitionJob(string $queueName, string $partition, string $jobId, string $payload, int $delay = 0, ?BalancedRedisJob $job = null): void
     {
         $redis = $this->getConnection();
 
         // Release the concurrency slot directly from our active key
-        $activeKey = $this->getActiveKey($queue, $partition);
+        $activeKey = $this->keys->active($queueName, $partition);
         $redis->hdel($activeKey, $jobId);
 
         // Re-add to partition queue
         if ($delay > 0) {
             $redis->zadd(
-                $this->getDelayedKey($queue, $partition),
+                $this->keys->delayed($queueName, $partition),
                 time() + $delay,
                 $payload
             );
         } else {
-            $this->pushToPartition($queue, $partition, $payload);
+            // Don't fire Horizon events on re-push (it's a release, not a new job)
+            $this->lastPushed = null;
+            $this->pushToPartitionWithoutHorizonEvents($queueName, $partition, $payload);
+        }
+
+        // Fire Horizon JobReleased event
+        if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobReleased::class)) {
+            $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobReleased($payload));
         }
     }
 
     /**
-     * Delete a completed job.
+     * Push to partition without firing Horizon events (used for release).
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $payload Job payload
      */
-    public function deletePartitionJob(string $queue, string $partition, string $jobId): void
+    protected function pushToPartitionWithoutHorizonEvents(string $queueName, string $partition, string $payload): mixed
+    {
+        $redis = $this->getConnection();
+
+        $partitionsKey = $this->keys->partitions($queueName);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
+
+        return $redis->eval(
+            LuaScripts::push(),
+            3,
+            $partitionsKey,
+            $queueKey,
+            $metricsKey,
+            $payload,
+            $partition,
+            time()
+        );
+    }
+
+    /**
+     * Delete a completed job.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $jobId Job ID
+     * @param BalancedRedisJob|null $job Job instance for Horizon events
+     */
+    public function deletePartitionJob(string $queueName, string $partition, string $jobId, ?BalancedRedisJob $job = null): void
     {
         $redis = $this->getConnection();
 
         // Release the concurrency slot directly from our active key
-        $activeKey = $this->getActiveKey($queue, $partition);
+        $activeKey = $this->keys->active($queueName, $partition);
         $redis->hdel($activeKey, $jobId);
+
+        // Fire Horizon JobDeleted event (marks job as complete in dashboard)
+        if ($job && $this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobDeleted::class)) {
+            $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobDeleted($job, $job->getRawBody()));
+        }
     }
 
     /**
@@ -267,24 +389,24 @@ class BalancedRedisQueue extends RedisQueue
         if (isset($job->partitionKey)) {
             return (string) $job->partitionKey;
         }
-    
+
         // 2. Overridden in job class (now works correctly without trait method!)
         if (method_exists($job, 'getPartitionKey')) {
             return (string) $job->getPartitionKey();
         }
-    
+
         // 3. Global resolver from config
         if (isset($this->partitionResolver)) {
             return (string) ($this->partitionResolver)($job);
         }
-    
+
         // 4. Auto-detect from common properties
         foreach (['userId', 'user_id', 'tenantId', 'tenant_id'] as $prop) {
             if (property_exists($job, $prop) && $job->$prop !== null) {
                 return (string) $job->$prop;
             }
         }
-    
+
         return 'default';
     }
 
@@ -301,46 +423,6 @@ class BalancedRedisQueue extends RedisQueue
     }
 
     /**
-     * Get the partitions set key.
-     */
-    public function getPartitionsKey(string $queue): string
-    {
-        return "{$this->prefix}:{$queue}:partitions";
-    }
-
-    /**
-     * Get the queue key for a partition.
-     */
-    public function getPartitionQueueKey(string $queue, string $partition): string
-    {
-        return "{$this->prefix}:{$queue}:{$partition}";
-    }
-
-    /**
-     * Get the active jobs key for a partition.
-     */
-    public function getActiveKey(string $queue, string $partition): string
-    {
-        return "{$this->prefix}:{$queue}:{$partition}:active";
-    }
-
-    /**
-     * Get the metrics key for a partition.
-     */
-    public function getMetricsKey(string $queue, string $partition): string
-    {
-        return "{$this->prefix}:metrics:{$queue}:{$partition}";
-    }
-
-    /**
-     * Get the delayed jobs key for a partition.
-     */
-    public function getDelayedKey(string $queue, string $partition): string
-    {
-        return "{$this->prefix}:{$queue}:{$partition}:delayed";
-    }
-
-    /**
      * Get the number of jobs ready to process (for Horizon compatibility).
      */
     public function readyNow($queue = null): int
@@ -353,9 +435,9 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function size($queue = null): int
     {
-        $queue = $this->getQueue($queue);
+        $queueName = $this->getCleanQueueName($queue);
         $redis = $this->getConnection();
-        $partitionsKey = $this->getPartitionsKey($queue);
+        $partitionsKey = $this->keys->partitions($queueName);
 
         $partitions = $redis->smembers($partitionsKey);
 
@@ -365,10 +447,76 @@ class BalancedRedisQueue extends RedisQueue
 
         $total = 0;
         foreach ($partitions as $partition) {
-            $queueKey = $this->getPartitionQueueKey($queue, $partition);
+            $queueKey = $this->keys->partitionQueue($queueName, $partition);
             $total += (int) $redis->llen($queueKey);
         }
 
         return $total;
+    }
+
+    // =========================================================================
+    // Horizon Integration (Experimental)
+    // =========================================================================
+
+    /**
+     * Check if Horizon integration is enabled.
+     */
+    protected function isHorizonEnabled(): bool
+    {
+        if ($this->horizonEnabled !== null) {
+            return $this->horizonEnabled;
+        }
+
+        $config = config('balanced-queue.horizon.enabled', 'auto');
+
+        if ($config === false) {
+            return $this->horizonEnabled = false;
+        }
+
+        if ($config === true) {
+            return $this->horizonEnabled = class_exists(\Laravel\Horizon\Horizon::class);
+        }
+
+        // 'auto' - enable only if Horizon is installed
+        return $this->horizonEnabled = class_exists(\Laravel\Horizon\Horizon::class);
+    }
+
+    /**
+     * Fire a Horizon event if Horizon integration is enabled.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param mixed $event The Horizon event instance
+     */
+    protected function fireHorizonEvent(string $queueName, $event): void
+    {
+        if (! $this->isHorizonEnabled()) {
+            return;
+        }
+
+        if (! $this->container || ! $this->container->bound(Dispatcher::class)) {
+            return;
+        }
+
+        $this->container->make(Dispatcher::class)->dispatch(
+            $event->connection($this->getConnectionName())->queue($queueName)
+        );
+    }
+
+    /**
+     * Prepare payload for Horizon (adds tags, type, pushedAt, etc.).
+     */
+    protected function preparePayloadForHorizon(string $payload, $job = null): string
+    {
+        if (! $this->isHorizonEnabled()) {
+            return $payload;
+        }
+
+        if (! class_exists(\Laravel\Horizon\JobPayload::class)) {
+            return $payload;
+        }
+
+        $horizonPayload = new \Laravel\Horizon\JobPayload($payload);
+
+        return $horizonPayload->prepare($job)->value;
     }
 }

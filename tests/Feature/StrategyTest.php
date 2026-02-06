@@ -89,20 +89,20 @@ class StrategyTest extends TestCase
 
         // Two partitions: one with 50 jobs, one with 5 jobs
         $redis->shouldReceive('smembers')
-            ->with('balanced-queue:test:partitions')
+            ->with('balanced-queue:queues:test:partitions')
             ->andReturn(['user:heavy', 'user:light']);
 
-        // user:heavy has 50 jobs
+        // user:heavy has 50 jobs (note: queue keys include 'queues:' prefix)
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:user:heavy')
+            ->with('balanced-queue:queues:test:user:heavy')
             ->andReturn(50);
 
         // user:light has 5 jobs (but still > 0, should get boost)
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:user:light')
+            ->with('balanced-queue:queues:test:user:light')
             ->andReturn(3);
 
-        // Metrics for wait time
+        // Metrics for wait time (metrics keys don't have 'queues:' prefix)
         $redis->shouldReceive('hget')
             ->with('balanced-queue:metrics:test:user:heavy', 'first_job_time')
             ->andReturn((string) (time() - 10)); // 10 seconds wait
@@ -119,7 +119,7 @@ class StrategyTest extends TestCase
             boostMultiplier: 1.5
         );
 
-        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:test:partitions');
+        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:queues:test:partitions');
 
         // The smaller queue (user:light) should be selected due to boost
         $this->assertEquals('user:light', $result);
@@ -130,17 +130,17 @@ class StrategyTest extends TestCase
         $redis = $this->getMockRedis();
 
         $redis->shouldReceive('smembers')
-            ->with('balanced-queue:test:partitions')
+            ->with('balanced-queue:queues:test:partitions')
             ->andReturn(['user:empty', 'user:active']);
 
         // user:empty has 0 jobs
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:user:empty')
+            ->with('balanced-queue:queues:test:user:empty')
             ->andReturn(0);
 
         // user:active has 5 jobs
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:user:active')
+            ->with('balanced-queue:queues:test:user:active')
             ->andReturn(5);
 
         $redis->shouldReceive('hget')
@@ -152,7 +152,7 @@ class StrategyTest extends TestCase
             ->andReturn((string) time());
 
         $strategy = new SmartFairStrategy();
-        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:test:partitions');
+        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:queues:test:partitions');
 
         $this->assertEquals('user:active', $result);
     }
@@ -163,23 +163,23 @@ class StrategyTest extends TestCase
 
         // Numeric partition keys (e.g., account IDs)
         $redis->shouldReceive('smembers')
-            ->with('balanced-queue:test:partitions')
+            ->with('balanced-queue:queues:test:partitions')
             ->andReturn(['123', '456', '789']);
 
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:123')
+            ->with('balanced-queue:queues:test:123')
             ->andReturn(5);
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:456')
+            ->with('balanced-queue:queues:test:456')
             ->andReturn(0);
         $redis->shouldReceive('llen')
-            ->with('balanced-queue:test:789')
+            ->with('balanced-queue:queues:test:789')
             ->andReturn(0);
 
         $redis->shouldReceive('hget')->andReturn(null);
 
         $strategy = new SmartFairStrategy();
-        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:test:partitions');
+        $result = $strategy->selectPartition($redis, 'test', 'balanced-queue:queues:test:partitions');
 
         $this->assertIsString($result);
         $this->assertEquals('123', $result);
