@@ -11,6 +11,7 @@ use Illuminate\Queue\RedisQueue;
 use Illuminate\Support\Str;
 use YanGusik\BalancedQueue\Contracts\ConcurrencyLimiter;
 use YanGusik\BalancedQueue\Contracts\PartitionStrategy;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 /**
  * Balanced Redis Queue implementation.
@@ -22,7 +23,7 @@ class BalancedRedisQueue extends RedisQueue
 {
     protected PartitionStrategy $strategy;
     protected ConcurrencyLimiter $limiter;
-    protected string $prefix;
+    protected RedisKeys $keys;
     protected \Closure $partitionResolver;
 
     /**
@@ -74,9 +75,17 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function setPrefix(string $prefix): self
     {
-        $this->prefix = $prefix;
+        $this->keys = new RedisKeys($prefix);
 
         return $this;
+    }
+
+    /**
+     * Get the Redis keys helper.
+     */
+    public function getKeys(): RedisKeys
+    {
+        return $this->keys;
     }
 
     /**
@@ -147,9 +156,9 @@ class BalancedRedisQueue extends RedisQueue
 
         $redis = $this->getConnection();
 
-        $partitionsKey = $this->getPartitionsKey($queueName);
-        $queueKey = $this->getPartitionQueueKey($queueName, $partition);
-        $metricsKey = $this->getMetricsKey($queueName, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
 
         $result = $redis->eval(
             LuaScripts::push(),
@@ -182,7 +191,7 @@ class BalancedRedisQueue extends RedisQueue
         $redis = $this->getConnection();
 
         // Select partition using strategy
-        $partitionsKey = $this->getPartitionsKey($queueName);
+        $partitionsKey = $this->keys->partitions($queueName);
         $partition = $this->strategy->selectPartition($redis, $queueName, $partitionsKey);
 
         if ($partition === null) {
@@ -203,10 +212,10 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
 
-        $queueKey = $this->getPartitionQueueKey($queueName, $partition);
-        $partitionsKey = $this->getPartitionsKey($queueName);
-        $activeKey = $this->getActiveKey($queueName, $partition);
-        $metricsKey = $this->getMetricsKey($queueName, $partition);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $activeKey = $this->keys->active($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
 
         // Check if we can process based on concurrency limit
         $activeCount = (int) $redis->hlen($activeKey);
@@ -264,14 +273,14 @@ class BalancedRedisQueue extends RedisQueue
     protected function tryNextPartition(string $queueName, string $excludePartition): ?Job
     {
         $redis = $this->getConnection();
-        $partitionsKey = $this->getPartitionsKey($queueName);
+        $partitionsKey = $this->keys->partitions($queueName);
         $maxConcurrent = $this->getLimiterMaxConcurrent();
 
         $partitions = $redis->smembers($partitionsKey);
         $partitions = array_diff($partitions, [$excludePartition]);
 
         foreach ($partitions as $partition) {
-            $activeKey = $this->getActiveKey($queueName, $partition);
+            $activeKey = $this->keys->active($queueName, $partition);
             $activeCount = (int) $redis->hlen($activeKey);
 
             if ($activeCount < $maxConcurrent) {
@@ -300,13 +309,13 @@ class BalancedRedisQueue extends RedisQueue
         $redis = $this->getConnection();
 
         // Release the concurrency slot directly from our active key
-        $activeKey = $this->getActiveKey($queueName, $partition);
+        $activeKey = $this->keys->active($queueName, $partition);
         $redis->hdel($activeKey, $jobId);
 
         // Re-add to partition queue
         if ($delay > 0) {
             $redis->zadd(
-                $this->getDelayedKey($queueName, $partition),
+                $this->keys->delayed($queueName, $partition),
                 time() + $delay,
                 $payload
             );
@@ -333,9 +342,9 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
 
-        $partitionsKey = $this->getPartitionsKey($queueName);
-        $queueKey = $this->getPartitionQueueKey($queueName, $partition);
-        $metricsKey = $this->getMetricsKey($queueName, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
+        $queueKey = $this->keys->partitionQueue($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
 
         return $redis->eval(
             LuaScripts::push(),
@@ -362,7 +371,7 @@ class BalancedRedisQueue extends RedisQueue
         $redis = $this->getConnection();
 
         // Release the concurrency slot directly from our active key
-        $activeKey = $this->getActiveKey($queueName, $partition);
+        $activeKey = $this->keys->active($queueName, $partition);
         $redis->hdel($activeKey, $jobId);
 
         // Fire Horizon JobDeleted event (marks job as complete in dashboard)
@@ -413,67 +422,6 @@ class BalancedRedisQueue extends RedisQueue
         return PHP_INT_MAX;
     }
 
-    // =========================================================================
-    // Redis Key Helpers
-    // =========================================================================
-    // These methods generate Redis keys with 'queues:' prefix for backwards
-    // compatibility with existing data. They accept clean queue names.
-    // =========================================================================
-
-    /**
-     * Get the partitions set key.
-     *
-     * @param string $queueName Clean queue name (e.g., 'default')
-     */
-    public function getPartitionsKey(string $queueName): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:partitions";
-    }
-
-    /**
-     * Get the queue key for a partition.
-     *
-     * @param string $queueName Clean queue name (e.g., 'default')
-     * @param string $partition Partition key
-     */
-    public function getPartitionQueueKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}";
-    }
-
-    /**
-     * Get the active jobs key for a partition.
-     *
-     * @param string $queueName Clean queue name (e.g., 'default')
-     * @param string $partition Partition key
-     */
-    public function getActiveKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}:active";
-    }
-
-    /**
-     * Get the metrics key for a partition.
-     *
-     * @param string $queueName Clean queue name (e.g., 'default')
-     * @param string $partition Partition key
-     */
-    public function getMetricsKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:metrics:{$queueName}:{$partition}";
-    }
-
-    /**
-     * Get the delayed jobs key for a partition.
-     *
-     * @param string $queueName Clean queue name (e.g., 'default')
-     * @param string $partition Partition key
-     */
-    public function getDelayedKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}:delayed";
-    }
-
     /**
      * Get the number of jobs ready to process (for Horizon compatibility).
      */
@@ -489,7 +437,7 @@ class BalancedRedisQueue extends RedisQueue
     {
         $queueName = $this->getCleanQueueName($queue);
         $redis = $this->getConnection();
-        $partitionsKey = $this->getPartitionsKey($queueName);
+        $partitionsKey = $this->keys->partitions($queueName);
 
         $partitions = $redis->smembers($partitionsKey);
 
@@ -499,7 +447,7 @@ class BalancedRedisQueue extends RedisQueue
 
         $total = 0;
         foreach ($partitions as $partition) {
-            $queueKey = $this->getPartitionQueueKey($queueName, $partition);
+            $queueKey = $this->keys->partitionQueue($queueName, $partition);
             $total += (int) $redis->llen($queueKey);
         }
 

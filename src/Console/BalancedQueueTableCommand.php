@@ -7,6 +7,7 @@ namespace YanGusik\BalancedQueue\Console;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Redis;
 use YanGusik\BalancedQueue\Support\Metrics;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 class BalancedQueueTableCommand extends Command
 {
@@ -18,11 +19,11 @@ class BalancedQueueTableCommand extends Command
 
     protected $description = 'Display balanced queue statistics';
 
-    protected string $prefix;
+    protected RedisKeys $keys;
 
     public function handle(): int
     {
-        $this->prefix = config('balanced-queue.redis.prefix', 'balanced-queue');
+        $this->keys = new RedisKeys(config('balanced-queue.redis.prefix', 'balanced-queue'));
         $showAll = $this->option('all');
         $watch = $this->option('watch');
         $interval = (int) $this->option('interval');
@@ -53,7 +54,7 @@ class BalancedQueueTableCommand extends Command
      */
     protected function getAllQueues(): array
     {
-        $metrics = new Metrics(Redis::connection(config('balanced-queue.redis.connection')), $this->prefix);
+        $metrics = new Metrics(Redis::connection(config('balanced-queue.redis.connection')), $this->keys->getPrefix());
 
         return $metrics->getAllQueues();
     }
@@ -118,7 +119,7 @@ class BalancedQueueTableCommand extends Command
         $redis = Redis::connection(config('balanced-queue.redis.connection'));
 
         // Get all partitions
-        $partitionsKey = $this->getPartitionsKey($queueName);
+        $partitionsKey = $this->keys->partitions($queueName);
         $partitions = $redis->smembers($partitionsKey);
 
         if (empty($partitions)) {
@@ -131,9 +132,9 @@ class BalancedQueueTableCommand extends Command
         $rows = [];
 
         foreach ($partitions as $partition) {
-            $queueListKey = $this->getPartitionQueueKey($queueName, $partition);
-            $activeKey = $this->getActiveKey($queueName, $partition);
-            $metricsKey = $this->getMetricsKey($queueName, $partition);
+            $queueListKey = $this->keys->partitionQueue($queueName, $partition);
+            $activeKey = $this->keys->active($queueName, $partition);
+            $metricsKey = $this->keys->metrics($queueName, $partition);
 
             $pending = (int) $redis->llen($queueListKey);
             $active = (int) $redis->hlen($activeKey);
@@ -207,29 +208,5 @@ class BalancedQueueTableCommand extends Command
         }
 
         return "<fg=green>{$num}</>";
-    }
-
-    // =========================================================================
-    // Redis Key Helpers (mirrors BalancedRedisQueue)
-    // =========================================================================
-
-    protected function getPartitionsKey(string $queueName): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:partitions";
-    }
-
-    protected function getPartitionQueueKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}";
-    }
-
-    protected function getActiveKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}:active";
-    }
-
-    protected function getMetricsKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:metrics:{$queueName}:{$partition}";
     }
 }

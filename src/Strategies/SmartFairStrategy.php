@@ -6,6 +6,7 @@ namespace YanGusik\BalancedQueue\Strategies;
 
 use Illuminate\Contracts\Redis\Connection;
 use YanGusik\BalancedQueue\Contracts\PartitionStrategy;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 /**
  * Smart fair partition selection strategy.
@@ -24,8 +25,7 @@ class SmartFairStrategy implements PartitionStrategy
     protected bool $boostSmallQueues;
     protected int $smallQueueThreshold;
     protected float $boostMultiplier;
-    protected string $prefix;
-    protected string $metricsKeyPrefix;
+    protected RedisKeys $keys;
 
     public function __construct(
         float $weightWaitTime = 0.6,
@@ -33,16 +33,14 @@ class SmartFairStrategy implements PartitionStrategy
         bool $boostSmallQueues = true,
         int $smallQueueThreshold = 5,
         float $boostMultiplier = 1.5,
-        string $prefix = 'balanced-queue',
-        string $metricsKeyPrefix = 'balanced-queue:metrics'
+        string $prefix = 'balanced-queue'
     ) {
         $this->weightWaitTime = $weightWaitTime;
         $this->weightQueueSize = $weightQueueSize;
         $this->boostSmallQueues = $boostSmallQueues;
         $this->smallQueueThreshold = $smallQueueThreshold;
         $this->boostMultiplier = $boostMultiplier;
-        $this->prefix = $prefix;
-        $this->metricsKeyPrefix = $metricsKeyPrefix;
+        $this->keys = new RedisKeys($prefix);
     }
 
     public function selectPartition(Connection $redis, string $queueName, string $partitionsKey): ?string
@@ -59,8 +57,8 @@ class SmartFairStrategy implements PartitionStrategy
 
         // First pass: collect data and find max queue size
         foreach ($partitions as $partition) {
-            $queueKey = $this->getPartitionQueueKey($queueName, $partition);
-            $metricsKey = $this->getMetricsKey($queueName, $partition);
+            $queueKey = $this->keys->partitionQueue($queueName, $partition);
+            $metricsKey = $this->keys->metrics($queueName, $partition);
 
             $queueSize = (int) $redis->llen($queueKey);
             $firstJobTime = $redis->hget($metricsKey, 'first_job_time');
@@ -111,19 +109,5 @@ class SmartFairStrategy implements PartitionStrategy
     public function getName(): string
     {
         return 'smart';
-    }
-
-    // =========================================================================
-    // Redis Key Helpers (mirrors BalancedRedisQueue)
-    // =========================================================================
-
-    protected function getPartitionQueueKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}";
-    }
-
-    protected function getMetricsKey(string $queueName, string $partition): string
-    {
-        return "{$this->metricsKeyPrefix}:{$queueName}:{$partition}";
     }
 }
