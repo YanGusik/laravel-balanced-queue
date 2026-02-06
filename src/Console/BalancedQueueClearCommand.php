@@ -6,6 +6,7 @@ namespace YanGusik\BalancedQueue\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Redis;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 class BalancedQueueClearCommand extends Command
 {
@@ -16,31 +17,30 @@ class BalancedQueueClearCommand extends Command
 
     protected $description = 'Clear balanced queue jobs';
 
-    protected string $prefix;
+    protected RedisKeys $keys;
 
     public function handle(): int
     {
-        $this->prefix = config('balanced-queue.redis.prefix', 'balanced-queue');
-        $queue = $this->argument('queue');
+        $this->keys = new RedisKeys(config('balanced-queue.redis.prefix', 'balanced-queue'));
+        $queueName = $this->argument('queue');
         $partition = $this->option('partition');
         $force = $this->option('force');
 
         $redis = Redis::connection(config('balanced-queue.redis.connection'));
-        $queueKey = "queues:{$queue}";
 
         if ($partition) {
-            return $this->clearPartition($redis, $queueKey, $partition, $force);
+            return $this->clearPartition($redis, $queueName, $partition, $force);
         }
 
-        return $this->clearAll($redis, $queueKey, $force);
+        return $this->clearAll($redis, $queueName, $force);
     }
 
-    protected function clearPartition($redis, string $queueKey, string $partition, bool $force): int
+    protected function clearPartition($redis, string $queueName, string $partition, bool $force): int
     {
-        $queueListKey = "{$this->prefix}:{$queueKey}:{$partition}";
-        $activeKey = "{$this->prefix}:{$queueKey}:{$partition}:active";
-        $metricsKey = "{$this->prefix}:metrics:{$queueKey}:{$partition}";
-        $partitionsKey = "{$this->prefix}:{$queueKey}:partitions";
+        $queueListKey = $this->keys->partitionQueue($queueName, $partition);
+        $activeKey = $this->keys->active($queueName, $partition);
+        $metricsKey = $this->keys->metrics($queueName, $partition);
+        $partitionsKey = $this->keys->partitions($queueName);
 
         $pending = (int) $redis->llen($queueListKey);
         $active = (int) $redis->hlen($activeKey);
@@ -70,9 +70,9 @@ class BalancedQueueClearCommand extends Command
         return Command::SUCCESS;
     }
 
-    protected function clearAll($redis, string $queueKey, bool $force): int
+    protected function clearAll($redis, string $queueName, bool $force): int
     {
-        $partitionsKey = "{$this->prefix}:{$queueKey}:partitions";
+        $partitionsKey = $this->keys->partitions($queueName);
         $partitions = $redis->smembers($partitionsKey);
 
         if (empty($partitions)) {
@@ -85,8 +85,8 @@ class BalancedQueueClearCommand extends Command
         $partitionStats = [];
 
         foreach ($partitions as $partition) {
-            $queueListKey = "{$this->prefix}:{$queueKey}:{$partition}";
-            $activeKey = "{$this->prefix}:{$queueKey}:{$partition}:active";
+            $queueListKey = $this->keys->partitionQueue($queueName, $partition);
+            $activeKey = $this->keys->active($queueName, $partition);
 
             $pending = (int) $redis->llen($queueListKey);
             $active = (int) $redis->hlen($activeKey);
@@ -101,7 +101,7 @@ class BalancedQueueClearCommand extends Command
             ];
         }
 
-        $this->warn("Queue: {$queueKey}");
+        $this->warn("Queue: {$queueName}");
         $this->table(
             ['Partition', 'Pending', 'Active'],
             array_map(fn($s) => [$s['partition'], $s['pending'], $s['active']], $partitionStats)
@@ -117,17 +117,16 @@ class BalancedQueueClearCommand extends Command
 
         // Clear all
         foreach ($partitions as $partition) {
-            $redis->del("{$this->prefix}:{$queueKey}:{$partition}");
-            $redis->del("{$this->prefix}:{$queueKey}:{$partition}:active");
-            $redis->del("{$this->prefix}:{$queueKey}:{$partition}:delayed");
-            $redis->del("{$this->prefix}:metrics:{$queueKey}:{$partition}");
+            $redis->del($this->keys->partitionQueue($queueName, $partition));
+            $redis->del($this->keys->active($queueName, $partition));
+            $redis->del($this->keys->delayed($queueName, $partition));
+            $redis->del($this->keys->metrics($queueName, $partition));
         }
 
         $redis->del($partitionsKey);
 
         // Clear round-robin state
-        $rrStateKey = "{$this->prefix}:rr-state:{$queueKey}";
-        $redis->del($rrStateKey);
+        $redis->del($this->keys->roundRobinState($queueName));
 
         $this->info("✓ Cleared {$totalPending} pending and {$totalActive} active jobs from " . count($partitions) . " partitions.");
 

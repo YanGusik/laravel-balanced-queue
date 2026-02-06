@@ -48,7 +48,8 @@ class BalancedRedisJob extends RedisJob
             $this->partition,
             $this->balancedJobId,
             $this->getRawBody(),
-            $delay
+            $delay,
+            $this
         );
     }
 
@@ -65,7 +66,8 @@ class BalancedRedisJob extends RedisJob
         $redis->deletePartitionJob(
             $this->queue,
             $this->partition,
-            $this->balancedJobId
+            $this->balancedJobId,
+            $this
         );
     }
 

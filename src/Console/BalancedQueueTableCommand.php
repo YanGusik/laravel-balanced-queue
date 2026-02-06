@@ -7,6 +7,7 @@ namespace YanGusik\BalancedQueue\Console;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Redis;
 use YanGusik\BalancedQueue\Support\Metrics;
+use YanGusik\BalancedQueue\Support\RedisKeys;
 
 class BalancedQueueTableCommand extends Command
 {
@@ -18,11 +19,11 @@ class BalancedQueueTableCommand extends Command
 
     protected $description = 'Display balanced queue statistics';
 
-    protected string $prefix;
+    protected RedisKeys $keys;
 
     public function handle(): int
     {
-        $this->prefix = config('balanced-queue.redis.prefix', 'balanced-queue');
+        $this->keys = new RedisKeys(config('balanced-queue.redis.prefix', 'balanced-queue'));
         $showAll = $this->option('all');
         $watch = $this->option('watch');
         $interval = (int) $this->option('interval');
@@ -53,7 +54,7 @@ class BalancedQueueTableCommand extends Command
      */
     protected function getAllQueues(): array
     {
-        $metrics = new Metrics(Redis::connection(config('balanced-queue.redis.connection')), $this->prefix);
+        $metrics = new Metrics(Redis::connection(config('balanced-queue.redis.connection')), $this->keys->getPrefix());
 
         return $metrics->getAllQueues();
     }
@@ -65,15 +66,15 @@ class BalancedQueueTableCommand extends Command
      */
     protected function displayQueues(array $queues): void
     {
-        foreach ($queues as $index => $queue) {
+        foreach ($queues as $index => $queueName) {
             if ($index > 0) {
                 $this->newLine();
             }
             if (count($queues) > 1) {
-                $this->info("Queue: {$queue}");
+                $this->info("Queue: {$queueName}");
                 $this->line(str_repeat('-', 40));
             }
-            $this->displayTable($queue);
+            $this->displayTable($queueName);
         }
     }
 
@@ -92,12 +93,12 @@ class BalancedQueueTableCommand extends Command
             // Clear screen
             $this->output->write("\033[2J\033[H");
 
-            foreach ($queues as $index => $queue) {
+            foreach ($queues as $index => $queueName) {
                 if ($index > 0) {
                     $this->newLine();
                 }
-                $this->displayHeader($queue);
-                $this->displayTable($queue);
+                $this->displayHeader($queueName);
+                $this->displayTable($queueName);
             }
             $this->displayFooter();
 
@@ -105,25 +106,24 @@ class BalancedQueueTableCommand extends Command
         }
     }
 
-    protected function displayHeader(string $queue): void
+    protected function displayHeader(string $queueName): void
     {
         $this->info("╔══════════════════════════════════════════════════════════════╗");
-        $this->info("║            BALANCED QUEUE MONITOR - {$queue}");
+        $this->info("║            BALANCED QUEUE MONITOR - {$queueName}");
         $this->info("╚══════════════════════════════════════════════════════════════╝");
         $this->newLine();
     }
 
-    protected function displayTable(string $queue): void
+    protected function displayTable(string $queueName): void
     {
         $redis = Redis::connection(config('balanced-queue.redis.connection'));
-        $queueKey = "queues:{$queue}";
 
         // Get all partitions
-        $partitionsKey = "{$this->prefix}:{$queueKey}:partitions";
+        $partitionsKey = $this->keys->partitions($queueName);
         $partitions = $redis->smembers($partitionsKey);
 
         if (empty($partitions)) {
-            $this->warn("No active partitions in queue '{$queue}'");
+            $this->warn("No active partitions in queue '{$queueName}'");
             return;
         }
 
@@ -132,9 +132,9 @@ class BalancedQueueTableCommand extends Command
         $rows = [];
 
         foreach ($partitions as $partition) {
-            $queueListKey = "{$this->prefix}:{$queueKey}:{$partition}";
-            $activeKey = "{$this->prefix}:{$queueKey}:{$partition}:active";
-            $metricsKey = "{$this->prefix}:metrics:{$queueKey}:{$partition}";
+            $queueListKey = $this->keys->partitionQueue($queueName, $partition);
+            $activeKey = $this->keys->active($queueName, $partition);
+            $metricsKey = $this->keys->metrics($queueName, $partition);
 
             $pending = (int) $redis->llen($queueListKey);
             $active = (int) $redis->hlen($activeKey);
