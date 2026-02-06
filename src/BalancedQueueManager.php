@@ -182,8 +182,7 @@ class BalancedQueueManager extends Manager
             $config['boost_small_queues'] ?? true,
             $config['small_queue_threshold'] ?? 5,
             $config['boost_multiplier'] ?? 1.5,
-            $this->getPrefix(),
-            $config['metrics_key_prefix'] ?? 'balanced-queue:metrics'
+            $this->getPrefix()
         );
     }
 

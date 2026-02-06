@@ -16,12 +16,12 @@ use Illuminate\Support\Facades\Redis;
 class Metrics
 {
     protected Connection $redis;
-    protected string $prefix;
+    protected RedisKeys $keys;
 
     public function __construct(?Connection $redis = null, string $prefix = 'balanced-queue')
     {
         $this->redis = $redis ?? Redis::connection(config('balanced-queue.redis.connection'));
-        $this->prefix = $prefix;
+        $this->keys = new RedisKeys($prefix);
     }
 
     /**
@@ -32,7 +32,7 @@ class Metrics
      */
     public function getPartitions(string $queueName): array
     {
-        $key = $this->getPartitionsKey($queueName);
+        $key = $this->keys->partitions($queueName);
 
         return $this->redis->smembers($key) ?: [];
     }
@@ -45,7 +45,7 @@ class Metrics
      */
     public function getQueueSize(string $queueName, string $partition): int
     {
-        $key = $this->getPartitionQueueKey($queueName, $partition);
+        $key = $this->keys->partitionQueue($queueName, $partition);
 
         return (int) $this->redis->llen($key);
     }
@@ -58,7 +58,7 @@ class Metrics
      */
     public function getActiveCount(string $queueName, string $partition): int
     {
-        $key = $this->getActiveKey($queueName, $partition);
+        $key = $this->keys->active($queueName, $partition);
 
         return (int) $this->redis->hlen($key);
     }
@@ -109,7 +109,7 @@ class Metrics
         $stats = [];
 
         foreach ($partitions as $partition) {
-            $metricsKey = $this->getMetricsKey($queueName, $partition);
+            $metricsKey = $this->keys->metrics($queueName, $partition);
             $metrics = $this->redis->hgetall($metricsKey) ?: [];
 
             $stats[$partition] = [
@@ -158,13 +158,13 @@ class Metrics
         $partitions = $this->getPartitions($queueName);
 
         foreach ($partitions as $partition) {
-            $this->redis->del($this->getPartitionQueueKey($queueName, $partition));
-            $this->redis->del($this->getActiveKey($queueName, $partition));
-            $this->redis->del($this->getDelayedKey($queueName, $partition));
-            $this->redis->del($this->getMetricsKey($queueName, $partition));
+            $this->redis->del($this->keys->partitionQueue($queueName, $partition));
+            $this->redis->del($this->keys->active($queueName, $partition));
+            $this->redis->del($this->keys->delayed($queueName, $partition));
+            $this->redis->del($this->keys->metrics($queueName, $partition));
         }
 
-        $this->redis->del($this->getPartitionsKey($queueName));
+        $this->redis->del($this->keys->partitions($queueName));
     }
 
     /**
@@ -176,7 +176,8 @@ class Metrics
     {
         // Laravel's Redis connection auto-adds the prefix from config,
         // so we only use our balanced-queue prefix in the pattern
-        $pattern = "{$this->prefix}:queues:*:partitions";
+        $prefix = $this->keys->getPrefix();
+        $pattern = "{$prefix}:queues:*:partitions";
         $queues = [];
 
         // Use KEYS command to find all partition keys
@@ -194,7 +195,7 @@ class Metrics
             $keyWithoutLaravelPrefix = $laravelPrefix ? substr($key, strlen($laravelPrefix)) : $key;
 
             // Extract queue name from: balanced-queue:queues:{queue}:partitions
-            $escapedPrefix = preg_quote($this->prefix, '/');
+            $escapedPrefix = preg_quote($prefix, '/');
             if (preg_match('/^' . $escapedPrefix . ':queues:(.+):partitions$/', $keyWithoutLaravelPrefix, $matches)) {
                 $queues[] = $matches[1];
             }
@@ -203,49 +204,4 @@ class Metrics
         return array_values(array_unique($queues));
     }
 
-    // =========================================================================
-    // Redis Key Helpers
-    // =========================================================================
-    // These methods mirror BalancedRedisQueue key generation for consistency.
-    // =========================================================================
-
-    /**
-     * Get the partitions set key.
-     */
-    protected function getPartitionsKey(string $queueName): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:partitions";
-    }
-
-    /**
-     * Get the queue key for a partition.
-     */
-    protected function getPartitionQueueKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}";
-    }
-
-    /**
-     * Get the active jobs key for a partition.
-     */
-    protected function getActiveKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}:active";
-    }
-
-    /**
-     * Get the metrics key for a partition.
-     */
-    protected function getMetricsKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:metrics:{$queueName}:{$partition}";
-    }
-
-    /**
-     * Get the delayed jobs key for a partition.
-     */
-    protected function getDelayedKey(string $queueName, string $partition): string
-    {
-        return "{$this->prefix}:queues:{$queueName}:{$partition}:delayed";
-    }
 }
