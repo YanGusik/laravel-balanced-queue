@@ -90,6 +90,7 @@ class LuaScripts
      * KEYS[2] - partitions set key
      * KEYS[3] - active jobs key
      * KEYS[4] - metrics key
+     * KEYS[5] - delayed jobs key
      * ARGV[1] - partition identifier
      * ARGV[2] - job id
      * ARGV[3] - max concurrent
@@ -103,6 +104,7 @@ class LuaScripts
             local partitions_key = KEYS[2]
             local active_key = KEYS[3]
             local metrics_key = KEYS[4]
+            local delayed_key = KEYS[5]
             local partition = ARGV[1]
             local job_id = ARGV[2]
             local max_concurrent = tonumber(ARGV[3])
@@ -126,15 +128,58 @@ class LuaScripts
                 -- Update metrics
                 redis.call('HINCRBY', metrics_key, 'total_popped', 1)
 
-                -- Check if queue is now empty
+                -- Remove partition from set only if both LIST and delayed ZSET are empty
                 local remaining = redis.call('LLEN', queue_key)
                 if remaining == 0 then
-                    redis.call('SREM', partitions_key, partition)
-                    redis.call('HDEL', metrics_key, 'first_job_time')
+                    local delayed_count = redis.call('ZCARD', delayed_key)
+                    if delayed_count == 0 then
+                        redis.call('SREM', partitions_key, partition)
+                        redis.call('HDEL', metrics_key, 'first_job_time')
+                    end
                 end
             end
 
             return job
+        LUA;
+    }
+
+    /**
+     * Migrate delayed jobs that are ready into the partition queue.
+     * Removes partition from set if both LIST and delayed ZSET are empty.
+     *
+     * KEYS[1] - delayed jobs key (ZSET)
+     * KEYS[2] - partition queue key (LIST)
+     * KEYS[3] - partitions set key
+     * ARGV[1] - partition identifier
+     * ARGV[2] - current timestamp
+     */
+    public static function migrateDelayed(): string
+    {
+        return <<<'LUA'
+            local delayed_key = KEYS[1]
+            local queue_key = KEYS[2]
+            local partitions_key = KEYS[3]
+            local partition = ARGV[1]
+            local current_time = tonumber(ARGV[2])
+
+            -- Get all jobs with score <= current_time (ready to process)
+            local jobs = redis.call('ZRANGEBYSCORE', delayed_key, '-inf', current_time)
+
+            if #jobs > 0 then
+                redis.call('ZREMRANGEBYSCORE', delayed_key, '-inf', current_time)
+                for _, job in ipairs(jobs) do
+                    redis.call('RPUSH', queue_key, job)
+                end
+            end
+
+            -- Remove partition from set only if both LIST and delayed ZSET are empty
+            local list_len = redis.call('LLEN', queue_key)
+            local delayed_count = redis.call('ZCARD', delayed_key)
+            if list_len == 0 and delayed_count == 0 then
+                redis.call('SREM', partitions_key, partition)
+            end
+
+            return #jobs
         LUA;
     }
 

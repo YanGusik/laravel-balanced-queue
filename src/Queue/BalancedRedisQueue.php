@@ -183,6 +183,30 @@ class BalancedRedisQueue extends RedisQueue
     }
 
     /**
+     * Push a job onto the queue after a delay.
+     */
+    public function later($delay, $job, $data = '', $queue = null): mixed
+    {
+        $queueName = $this->getCleanQueueName($queue);
+        $partition = $this->resolvePartition($job);
+        $payload = $this->createPayload($job, $this->getQueue($queue), $data);
+
+        $redis = $this->getConnection();
+
+        // Add partition to SET so strategy visits it
+        $redis->sadd($this->keys->partitions($queueName), $partition);
+
+        // Push to delayed ZSET with score = availableAt timestamp
+        $redis->zadd(
+            $this->keys->delayed($queueName, $partition),
+            $this->availableAt($delay),
+            $payload
+        );
+
+        return 0;
+    }
+
+    /**
      * Pop the next job from the queue.
      */
     public function pop($queue = null, $index = 0): ?Job
@@ -198,8 +222,27 @@ class BalancedRedisQueue extends RedisQueue
             return null;
         }
 
+        // Migrate any delayed jobs that are ready for this partition
+        $this->migratePartitionDelayed($queueName, $partition);
+
         // Try to pop a job with concurrency limit
         return $this->popFromPartition($queueName, $partition);
+    }
+
+    /**
+     * Migrate delayed jobs that are ready into the partition queue.
+     */
+    protected function migratePartitionDelayed(string $queueName, string $partition): void
+    {
+        $this->getConnection()->eval(
+            LuaScripts::migrateDelayed(),
+            3,
+            $this->keys->delayed($queueName, $partition),
+            $this->keys->partitionQueue($queueName, $partition),
+            $this->keys->partitions($queueName),
+            $partition,
+            time()
+        );
     }
 
     /**
@@ -231,11 +274,12 @@ class BalancedRedisQueue extends RedisQueue
         // Pop with limit check
         $payload = $redis->eval(
             LuaScripts::popWithLimit(),
-            4,
+            5,
             $queueKey,
             $partitionsKey,
             $activeKey,
             $metricsKey,
+            $this->keys->delayed($queueName, $partition),
             $partition,
             $jobId,
             $this->getLimiterMaxConcurrent(),

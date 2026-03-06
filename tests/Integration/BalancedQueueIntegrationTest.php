@@ -106,6 +106,119 @@ class BalancedQueueIntegrationTest extends IntegrationTestCase
         $this->assertIsString($partitions[0]);
     }
 
+    public function test_later_adds_partition_to_set(): void
+    {
+        $job = new TestJob(['user_id' => 555]);
+
+        $this->queue->later(3600, $job, '', 'default');
+
+        $partitions = $this->metrics->getPartitions('default');
+        $this->assertContains('user:555', $partitions);
+    }
+
+    public function test_later_job_not_available_before_delay(): void
+    {
+        $job = new TestJob(['user_id' => 555]);
+
+        $this->queue->later(3600, $job, '', 'default');
+
+        // Job should not be available yet (delay = 1 hour)
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNull($poppedJob);
+    }
+
+    public function test_later_job_available_after_delay_expires(): void
+    {
+        $job = new TestJob(['user_id' => 555]);
+
+        // Delay of 0 seconds — immediately available
+        $this->queue->later(0, $job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+    }
+
+    public function test_later_partition_removed_from_set_after_job_processed(): void
+    {
+        $job = new TestJob(['user_id' => 555]);
+
+        $this->queue->later(0, $job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        $poppedJob->delete();
+
+        // After processing, partition should be removed from set
+        $partitions = $this->metrics->getPartitions('default');
+        $this->assertNotContains('user:555', $partitions);
+    }
+
+    public function test_later_partition_stays_in_set_while_delayed_jobs_pending(): void
+    {
+        $job = new TestJob(['user_id' => 555]);
+
+        // Push with 1 hour delay — partition should stay in set
+        $this->queue->later(3600, $job, '', 'default');
+
+        // Pop returns null (nothing ready), but partition stays because delayed ZSET is not empty
+        $this->queue->pop('default');
+
+        $partitions = $this->metrics->getPartitions('default');
+        $this->assertContains('user:555', $partitions);
+    }
+
+    // public function test_later_job_becomes_available_after_delay_with_sleep(): void
+    // {
+    //     $job = new TestJob(['user_id' => 555]);
+    //
+    //     $this->queue->later(2, $job, '', 'default');
+    //
+    //     // Before delay expires — not available
+    //     $before = $this->queue->pop('default');
+    //     $this->assertNull($before, 'Job should not be available before delay expires');
+    //
+    //     sleep(3);
+    //
+    //     // After delay expires — available
+    //     $after = $this->queue->pop('default');
+    //     $this->assertNotNull($after, 'Job should be available after delay expires');
+    // }
+
+    public function test_release_with_delay_requeues_job(): void
+    {
+        $job = new TestJob(['user_id' => 777]);
+
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        // Release back with delay of 0 (immediately available)
+        $poppedJob->release(0);
+
+        // Job should be available again
+        $poppedJob2 = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob2);
+    }
+
+    public function test_release_with_future_delay_not_available_immediately(): void
+    {
+        $job = new TestJob(['user_id' => 777]);
+
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        // Release back with 1 hour delay
+        $poppedJob->release(3600);
+
+        // Job should not be available yet
+        $poppedJob2 = $this->queue->pop('default');
+        $this->assertNull($poppedJob2);
+    }
+
     public function test_concurrent_limit_respected(): void
     {
         // Default max_concurrent is 2, push 3 jobs to same partition
