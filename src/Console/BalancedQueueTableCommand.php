@@ -109,7 +109,7 @@ class BalancedQueueTableCommand extends Command
     protected function displayHeader(string $queueName): void
     {
         $this->info("╔══════════════════════════════════════════════════════════════╗");
-        $this->info("║            BALANCED QUEUE MONITOR - {$queueName}");
+        $this->info(Str::of("║            BALANCED QUEUE MONITOR - {$queueName}")->padRight(63)->finish("║")->toString());
         $this->info("╚══════════════════════════════════════════════════════════════╝");
         $this->newLine();
     }
@@ -177,10 +177,18 @@ class BalancedQueueTableCommand extends Command
     protected function displayFooter(): void
     {
         $this->newLine();
-        $maxConcurrent = config('balanced-queue.limiters.simple.max_concurrent', 2);
         $strategy = config('balanced-queue.strategy', 'round-robin');
+        $limiter = config('balanced-queue.limiter', 'null');
 
-        $this->line("  <fg=gray>Strategy:</> {$strategy} | <fg=gray>Max concurrent:</> {$maxConcurrent}");
+        $limiterInfo = match($limiter) {
+            'null' => '<fg=gray></>',
+            'simple' => ' | <fg=gray>Max concurrent:</> ' . config('balanced-queue.limiters.simple.max_concurrent', 2),
+            'adaptive' => ' | <fg=gray>Base limit:</> ' . config('balanced-queue.limiters.adaptive.base_limit', 2)
+                            . ' | <fg=gray>Max limit:</> ' . config('balanced-queue.limiters.adaptive.max_limit', 5),
+        };
+
+        $this->line("  <fg=gray>Strategy:</> {$strategy}");
+        $this->line("  <fg=gray>Limiter:</> {$limiter}" . $limiterInfo);
         $this->line("  <fg=gray>Updated:</> " . now()->format('H:i:s'));
     }
 
