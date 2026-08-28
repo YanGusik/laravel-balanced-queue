@@ -6,6 +6,7 @@ namespace YanGusik\BalancedQueue\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Str;
 use YanGusik\BalancedQueue\Support\Metrics;
 use YanGusik\BalancedQueue\Support\RedisKeys;
 
