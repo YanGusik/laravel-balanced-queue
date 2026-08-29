@@ -91,6 +91,8 @@ class LuaScripts
      * KEYS[3] - active jobs key
      * KEYS[4] - metrics key
      * KEYS[5] - delayed jobs key
+     * KEYS[6] - reserved jobs key (HASH job id => reserved payload)
+     * KEYS[7] - reserved expiry index key (ZSET job id => expires at)
      * ARGV[1] - partition identifier
      * ARGV[2] - job id
      * ARGV[3] - max concurrent
@@ -105,11 +107,13 @@ class LuaScripts
             local active_key = KEYS[3]
             local metrics_key = KEYS[4]
             local delayed_key = KEYS[5]
+            local reserved_key = KEYS[6]
+            local reserved_index = KEYS[7]
             local partition = ARGV[1]
             local job_id = ARGV[2]
             local max_concurrent = tonumber(ARGV[3])
             local lock_ttl = tonumber(ARGV[4])
-            local timestamp = ARGV[5]
+            local timestamp = tonumber(ARGV[5])
 
             -- Check concurrency limit
             local active_count = redis.call('HLEN', active_key)
@@ -125,14 +129,27 @@ class LuaScripts
                 redis.call('HSET', active_key, job_id, timestamp)
                 redis.call('EXPIRE', active_key, lock_ttl)
 
+                -- Keep a copy of the payload, with its attempt count bumped, so
+                -- the job survives the death of the worker holding it. Cleared
+                -- when the job is deleted or released.
+                local decoded = cjson.decode(job)
+                decoded['attempts'] = (decoded['attempts'] or 0) + 1
+                redis.call('HSET', reserved_key, job_id, cjson.encode(decoded))
+                redis.call('ZADD', reserved_index, timestamp + lock_ttl, job_id)
+
                 -- Update metrics
                 redis.call('HINCRBY', metrics_key, 'total_popped', 1)
 
-                -- Remove partition from set only if both LIST and delayed ZSET are empty
+                -- Drop the partition only when nothing is left to do for it: no
+                -- ready jobs, no delayed jobs, and nothing in flight. Dropping
+                -- it while a reservation is outstanding would make that
+                -- reservation unreachable, since no strategy would select the
+                -- partition again.
                 local remaining = redis.call('LLEN', queue_key)
                 if remaining == 0 then
                     local delayed_count = redis.call('ZCARD', delayed_key)
-                    if delayed_count == 0 then
+                    local reserved_count = redis.call('ZCARD', reserved_index)
+                    if delayed_count == 0 and reserved_count == 0 then
                         redis.call('SREM', partitions_key, partition)
                         redis.call('HDEL', metrics_key, 'first_job_time')
                     end
@@ -150,6 +167,7 @@ class LuaScripts
      * KEYS[1] - delayed jobs key (ZSET)
      * KEYS[2] - partition queue key (LIST)
      * KEYS[3] - partitions set key
+     * KEYS[4] - reserved expiry index key (ZSET)
      * ARGV[1] - partition identifier
      * ARGV[2] - current timestamp
      */
@@ -159,6 +177,7 @@ class LuaScripts
             local delayed_key = KEYS[1]
             local queue_key = KEYS[2]
             local partitions_key = KEYS[3]
+            local reserved_index = KEYS[4]
             local partition = ARGV[1]
             local current_time = tonumber(ARGV[2])
 
@@ -172,14 +191,127 @@ class LuaScripts
                 end
             end
 
-            -- Remove partition from set only if both LIST and delayed ZSET are empty
+            -- Keep the partition registered while a reservation is outstanding,
+            -- otherwise an in-flight job whose worker dies is unreachable.
             local list_len = redis.call('LLEN', queue_key)
             local delayed_count = redis.call('ZCARD', delayed_key)
-            if list_len == 0 and delayed_count == 0 then
+            local reserved_count = redis.call('ZCARD', reserved_index)
+            if list_len == 0 and delayed_count == 0 and reserved_count == 0 then
                 redis.call('SREM', partitions_key, partition)
             end
 
             return #jobs
+        LUA;
+    }
+
+    /**
+     * Return expired reservations to the partition's ready list.
+     *
+     * A reservation expires retry_after seconds after the pop. Reaching that
+     * point means the worker holding the job never deleted or released it - it
+     * was killed. The stock Redis driver recovers such jobs from its reserved
+     * ZSET; this is the partitioned equivalent.
+     *
+     * KEYS[1] - reserved expiry index key (ZSET job id => expires at)
+     * KEYS[2] - reserved jobs key (HASH job id => reserved payload)
+     * KEYS[3] - partition queue key (LIST)
+     * KEYS[4] - active jobs key (HASH)
+     * KEYS[5] - partitions set key
+     * KEYS[6] - delayed jobs key (ZSET)
+     * KEYS[7] - metrics key
+     * ARGV[1] - partition identifier
+     * ARGV[2] - current timestamp
+     */
+    public static function migrateExpired(): string
+    {
+        return <<<'LUA'
+            local reserved_index = KEYS[1]
+            local reserved_key = KEYS[2]
+            local queue_key = KEYS[3]
+            local active_key = KEYS[4]
+            local partitions_key = KEYS[5]
+            local delayed_key = KEYS[6]
+            local metrics_key = KEYS[7]
+            local partition = ARGV[1]
+            local current_time = tonumber(ARGV[2])
+
+            local expired = redis.call('ZRANGEBYSCORE', reserved_index, '-inf', current_time)
+            local recovered = 0
+
+            for _, job_id in ipairs(expired) do
+                local payload = redis.call('HGET', reserved_key, job_id)
+
+                if payload then
+                    redis.call('RPUSH', queue_key, payload)
+                    recovered = recovered + 1
+                end
+
+                -- Drop the reservation and free the concurrency slot it held
+                redis.call('HDEL', reserved_key, job_id)
+                redis.call('HDEL', active_key, job_id)
+                redis.call('ZREM', reserved_index, job_id)
+            end
+
+            if recovered > 0 then
+                redis.call('SADD', partitions_key, partition)
+            elseif #expired > 0 then
+                -- Reservations vanished without payloads: the partition may now
+                -- be idle, so do not leave it registered forever.
+                if redis.call('LLEN', queue_key) == 0
+                    and redis.call('ZCARD', delayed_key) == 0
+                    and redis.call('ZCARD', reserved_index) == 0 then
+                    redis.call('SREM', partitions_key, partition)
+                    redis.call('HDEL', metrics_key, 'first_job_time')
+                end
+            end
+
+            return recovered
+        LUA;
+    }
+
+    /**
+     * Forget one reservation and unregister the partition if it fell idle.
+     *
+     * The pop script keeps a partition registered while a reservation is
+     * outstanding, so the last reservation to be cleared has to re-check
+     * whether anything is left for that partition. Without this, partitions
+     * accumulate in the set and workers keep selecting empty ones.
+     *
+     * KEYS[1] - reserved jobs key (HASH)
+     * KEYS[2] - reserved expiry index key (ZSET)
+     * KEYS[3] - active jobs key (HASH)
+     * KEYS[4] - partition queue key (LIST)
+     * KEYS[5] - delayed jobs key (ZSET)
+     * KEYS[6] - partitions set key
+     * KEYS[7] - metrics key
+     * ARGV[1] - job id
+     * ARGV[2] - partition identifier
+     */
+    public static function clearReservation(): string
+    {
+        return <<<'LUA'
+            local reserved_key = KEYS[1]
+            local reserved_index = KEYS[2]
+            local active_key = KEYS[3]
+            local queue_key = KEYS[4]
+            local delayed_key = KEYS[5]
+            local partitions_key = KEYS[6]
+            local metrics_key = KEYS[7]
+            local job_id = ARGV[1]
+            local partition = ARGV[2]
+
+            redis.call('HDEL', reserved_key, job_id)
+            redis.call('ZREM', reserved_index, job_id)
+            redis.call('HDEL', active_key, job_id)
+
+            if redis.call('LLEN', queue_key) == 0
+                and redis.call('ZCARD', delayed_key) == 0
+                and redis.call('ZCARD', reserved_index) == 0 then
+                redis.call('SREM', partitions_key, partition)
+                redis.call('HDEL', metrics_key, 'first_job_time')
+            end
+
+            return 1
         LUA;
     }
 

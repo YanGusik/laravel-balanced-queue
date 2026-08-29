@@ -41,6 +41,27 @@ class RedisKeys
     }
 
     /**
+     * Get the reserved jobs key for a partition.
+     *
+     * Hash of job id => reserved payload, so a job whose worker dies can be
+     * recovered rather than lost with the worker process.
+     */
+    public function reserved(string $queueName, string $partition): string
+    {
+        return "{$this->prefix}:queues:{$queueName}:{$partition}:reserved";
+    }
+
+    /**
+     * Get the reserved expiry index key for a partition.
+     *
+     * Sorted set of job id => timestamp at which the reservation expires.
+     */
+    public function reservedIndex(string $queueName, string $partition): string
+    {
+        return "{$this->prefix}:queues:{$queueName}:{$partition}:reserved-index";
+    }
+
+    /**
      * Get the metrics key for a partition.
      */
     public function metrics(string $queueName, string $partition): string
