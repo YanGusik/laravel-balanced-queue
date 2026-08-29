@@ -334,6 +334,18 @@ class BalancedRedisQueue extends RedisQueue
             return null;
         }
 
+        // The payload handed back on release must carry one more attempt than
+        // the one just popped, otherwise attempts() is frozen and maxTries is
+        // never reached: a permanently failing job then cycles forever instead
+        // of landing in failed_jobs.
+        $reserved = $payload;
+        $decoded = json_decode($payload, true);
+
+        if (is_array($decoded)) {
+            $decoded['attempts'] = ($decoded['attempts'] ?? 0) + 1;
+            $reserved = json_encode($decoded);
+        }
+
         // Fire Horizon JobReserved event
         if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobReserved::class)) {
             $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobReserved($payload));
@@ -343,7 +355,7 @@ class BalancedRedisQueue extends RedisQueue
             $this->container,
             $this,
             $payload,
-            $payload, // reserved is same as payload for balanced queue
+            $reserved,
             $this->connectionName,
             $queueName,
             $partition,

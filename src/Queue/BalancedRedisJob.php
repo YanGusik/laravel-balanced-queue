@@ -47,7 +47,8 @@ class BalancedRedisJob extends RedisJob
             $this->queue,
             $this->partition,
             $this->balancedJobId,
-            $this->getRawBody(),
+            // the reserved copy, which carries the incremented attempt count
+            $this->getReservedJob(),
             $delay,
             $this
         );

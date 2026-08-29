@@ -250,6 +250,29 @@ class BalancedQueueIntegrationTest extends IntegrationTestCase
         $this->assertNotNull($poppedJob4, 'Third job should be available after releasing slot');
     }
 
+    public function test_attempts_increments_across_pop_release_cycles(): void
+    {
+        $job = new TestJob(['user_id' => 321]);
+
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob1 = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob1);
+        $this->assertSame(1, $poppedJob1->attempts());
+
+        $poppedJob1->release(0);
+
+        $poppedJob2 = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob2);
+        $this->assertSame(2, $poppedJob2->attempts());
+
+        $poppedJob2->release(0);
+
+        $poppedJob3 = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob3);
+        $this->assertSame(3, $poppedJob3->attempts());
+    }
+
     public function test_push_with_after_commit_is_deferred_until_transaction_commits(): void
     {
         $job = (new TestJob(['user_id' => 999]))->afterCommit();
