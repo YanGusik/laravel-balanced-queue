@@ -248,4 +248,35 @@ class BalancedQueueIntegrationTest extends IntegrationTestCase
         $poppedJob4 = $this->queue->pop('default');
         $this->assertNotNull($poppedJob4, 'Third job should be available after releasing slot');
     }
+
+    public function test_release_does_not_leave_orphan_payload_in_stock_redis_keys(): void
+    {
+        $job = new TestJob(['user_id' => 444]);
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        $poppedJob->release(0);
+
+        // BalancedRedisJob must never touch the key scheme of the stock
+        // RedisQueue driver — it partitions everything under its own keys.
+        $redis = Redis::connection(config('balanced-queue.redis.connection'));
+        $this->assertSame(0, $redis->zcard('queues:default:reserved'));
+        $this->assertSame(0, $redis->zcard('queues:default:delayed'));
+    }
+
+    public function test_delete_does_not_leave_orphan_payload_in_stock_redis_keys(): void
+    {
+        $job = new TestJob(['user_id' => 445]);
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        $poppedJob->delete();
+
+        $redis = Redis::connection(config('balanced-queue.redis.connection'));
+        $this->assertSame(0, $redis->zcard('queues:default:reserved'));
+    }
 }
