@@ -265,7 +265,8 @@ class BalancedRedisQueue extends RedisQueue
             return null;
         }
 
-        // Migrate any delayed jobs that are ready for this partition
+        // Return jobs whose worker died, then migrate delayed jobs that are due
+        $this->migratePartitionExpired($queueName, $partition);
         $this->migratePartitionDelayed($queueName, $partition);
 
         // Try to pop a job with concurrency limit
@@ -279,10 +280,31 @@ class BalancedRedisQueue extends RedisQueue
     {
         $this->getConnection()->eval(
             LuaScripts::migrateDelayed(),
-            3,
+            4,
             $this->keys->delayed($queueName, $partition),
             $this->keys->partitionQueue($queueName, $partition),
             $this->keys->partitions($queueName),
+            $this->keys->reservedIndex($queueName, $partition),
+            $partition,
+            time()
+        );
+    }
+
+    /**
+     * Return any expired reservations for the partition to its ready list.
+     */
+    protected function migratePartitionExpired(string $queueName, string $partition): void
+    {
+        $this->getConnection()->eval(
+            LuaScripts::migrateExpired(),
+            7,
+            $this->keys->reservedIndex($queueName, $partition),
+            $this->keys->reserved($queueName, $partition),
+            $this->keys->partitionQueue($queueName, $partition),
+            $this->keys->active($queueName, $partition),
+            $this->keys->partitions($queueName),
+            $this->keys->delayed($queueName, $partition),
+            $this->keys->metrics($queueName, $partition),
             $partition,
             time()
         );
@@ -317,12 +339,14 @@ class BalancedRedisQueue extends RedisQueue
         // Pop with limit check
         $payload = $redis->eval(
             LuaScripts::popWithLimit(),
-            5,
+            7,
             $queueKey,
             $partitionsKey,
             $activeKey,
             $metricsKey,
             $this->keys->delayed($queueName, $partition),
+            $this->keys->reserved($queueName, $partition),
+            $this->keys->reservedIndex($queueName, $partition),
             $partition,
             $jobId,
             $this->getLimiterMaxConcurrent(),
@@ -407,22 +431,24 @@ class BalancedRedisQueue extends RedisQueue
     {
         $redis = $this->getConnection();
 
-        // Release the concurrency slot directly from our active key
-        $activeKey = $this->keys->active($queueName, $partition);
-        $redis->hdel($activeKey, $jobId);
-
-        // Re-add to partition queue
+        // Re-queue before dropping the reservation: if this process dies in
+        // between, the reservation expires and the job is recovered, rather
+        // than disappearing with the reservation.
         if ($delay > 0) {
             $redis->zadd(
                 $this->keys->delayed($queueName, $partition),
                 time() + $delay,
                 $payload
             );
+            $redis->sadd($this->keys->partitions($queueName), $partition);
         } else {
             // Don't fire Horizon events on re-push (it's a release, not a new job)
             $this->lastPushed = null;
             $this->pushToPartitionWithoutHorizonEvents($queueName, $partition, $payload);
         }
+
+        // Drop the reservation and free the concurrency slot it held
+        $this->clearReservation($queueName, $partition, $jobId);
 
         // Fire Horizon JobReleased event
         if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobReleased::class)) {
@@ -467,16 +493,41 @@ class BalancedRedisQueue extends RedisQueue
      */
     public function deletePartitionJob(string $queueName, string $partition, string $jobId, ?BalancedRedisJob $job = null): void
     {
-        $redis = $this->getConnection();
-
-        // Release the concurrency slot directly from our active key
-        $activeKey = $this->keys->active($queueName, $partition);
-        $redis->hdel($activeKey, $jobId);
+        // Drop the reservation, free its slot, and unregister the partition if
+        // this was the last thing outstanding for it.
+        $this->clearReservation($queueName, $partition, $jobId);
 
         // Fire Horizon JobDeleted event (marks job as complete in dashboard)
         if ($job && $this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobDeleted::class)) {
             $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobDeleted($job, $job->getRawBody()));
         }
+    }
+
+    /**
+     * Forget a reservation: its payload copy, its expiry entry and its slot.
+     *
+     * Also unregisters the partition when nothing is left for it, which the pop
+     * script can no longer do while a reservation is outstanding.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $jobId Job ID
+     */
+    protected function clearReservation(string $queueName, string $partition, string $jobId): void
+    {
+        $this->getConnection()->eval(
+            LuaScripts::clearReservation(),
+            7,
+            $this->keys->reserved($queueName, $partition),
+            $this->keys->reservedIndex($queueName, $partition),
+            $this->keys->active($queueName, $partition),
+            $this->keys->partitionQueue($queueName, $partition),
+            $this->keys->delayed($queueName, $partition),
+            $this->keys->partitions($queueName),
+            $this->keys->metrics($queueName, $partition),
+            $jobId,
+            $partition
+        );
     }
 
     /**

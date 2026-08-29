@@ -250,6 +250,30 @@ class BalancedQueueIntegrationTest extends IntegrationTestCase
         $this->assertNotNull($poppedJob4, 'Third job should be available after releasing slot');
     }
 
+    public function test_expired_reservation_is_recovered_after_worker_crash(): void
+    {
+        $job = new TestJob(['user_id' => 606]);
+        $this->queue->push($job, '', 'default');
+
+        $poppedJob = $this->queue->pop('default');
+        $this->assertNotNull($poppedJob);
+
+        // Simulate a worker that died holding the job: it never called
+        // release()/delete(), so the reservation is still sitting there.
+        // Backdate its expiry so the next pop() treats it as abandoned.
+        $redis = Redis::connection(config('balanced-queue.redis.connection'));
+        $reservedIndexKey = $this->queue->getKeys()->reservedIndex('default', 'user:606');
+        $redis->zadd($reservedIndexKey, time() - 1, $poppedJob->getBalancedJobId());
+
+        $recoveredJob = $this->queue->pop('default');
+        $this->assertNotNull($recoveredJob, 'Expired reservation should be recovered back into the ready queue');
+
+        // The dead worker's slot must be freed, not left occupied forever —
+        // only the recovered job's own (new) reservation should hold a slot.
+        $activeKey = $this->queue->getKeys()->active('default', 'user:606');
+        $this->assertSame(1, $redis->hlen($activeKey));
+    }
+
     public function test_release_does_not_leave_orphan_payload_in_stock_redis_keys(): void
     {
         $job = new TestJob(['user_id' => 444]);
