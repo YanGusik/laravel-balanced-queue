@@ -111,16 +111,32 @@ class BalancedRedisQueue extends RedisQueue
 
     /**
      * Push a job onto the queue with partition support.
+     *
+     * Routed through enqueueUsing() so that `after_commit` / ->afterCommit()
+     * dispatches are held until the surrounding database transaction commits,
+     * and so that the JobQueueing / JobQueued events are raised.
      */
     public function push($job, $data = '', $queue = null): mixed
     {
         $queueName = $this->getCleanQueueName($queue);
+
+        // Resolved eagerly: the callback below may run after commit, by which
+        // point the partition resolver's context (e.g. the current tenant) is
+        // no longer guaranteed to be the dispatching context.
         $partition = $this->resolvePartition($job);
 
-        // Store for Horizon integration
-        $this->lastPushed = $job;
+        return $this->enqueueUsing(
+            $job,
+            $this->createPayload($job, $this->getQueue($queue), $data),
+            $queue,
+            null,
+            function ($payload) use ($queueName, $partition, $job) {
+                // Store for Horizon integration
+                $this->lastPushed = $job;
 
-        return $this->pushToPartition($queueName, $partition, $this->createPayload($job, $this->getQueue($queue), $data));
+                return $this->pushToPartition($queueName, $partition, $payload);
+            }
+        );
     }
 
     /**
@@ -184,26 +200,53 @@ class BalancedRedisQueue extends RedisQueue
 
     /**
      * Push a job onto the queue after a delay.
+     *
+     * Routed through enqueueUsing() for the same reasons as push().
      */
     public function later($delay, $job, $data = '', $queue = null): mixed
     {
         $queueName = $this->getCleanQueueName($queue);
         $partition = $this->resolvePartition($job);
-        $payload = $this->createPayload($job, $this->getQueue($queue), $data);
 
-        $redis = $this->getConnection();
-
-        // Add partition to SET so strategy visits it
-        $redis->sadd($this->keys->partitions($queueName), $partition);
-
-        // Push to delayed ZSET with score = availableAt timestamp
-        $redis->zadd(
-            $this->keys->delayed($queueName, $partition),
-            $this->availableAt($delay),
-            $payload
+        return $this->enqueueUsing(
+            $job,
+            $this->createPayload($job, $this->getQueue($queue), $data),
+            $queue,
+            $delay,
+            fn ($payload, $queue, $delay) => $this->pushDelayedToPartition(
+                $queueName,
+                $partition,
+                $payload,
+                $this->availableAt($delay)
+            )
         );
+    }
 
-        return 0;
+    /**
+     * Push a payload onto a partition's delayed set.
+     *
+     * Registering the partition and adding the payload must be atomic: a pop
+     * landing between the two removes the partition from the set once the
+     * ready list drains, stranding the delayed job in a partition no strategy
+     * will ever select.
+     *
+     * @param string $queueName Clean queue name (e.g., 'default')
+     * @param string $partition Partition key
+     * @param string $payload Job payload
+     * @param int $availableAt Unix timestamp at which the job becomes available
+     */
+    protected function pushDelayedToPartition(string $queueName, string $partition, string $payload, int $availableAt): mixed
+    {
+        return $this->getConnection()->eval(
+            LuaScripts::pushDelayed(),
+            3,
+            $this->keys->partitions($queueName),
+            $this->keys->delayed($queueName, $partition),
+            $this->keys->metrics($queueName, $partition),
+            $payload,
+            $partition,
+            $availableAt
+        );
     }
 
     /**
@@ -291,6 +334,18 @@ class BalancedRedisQueue extends RedisQueue
             return null;
         }
 
+        // The payload handed back on release must carry one more attempt than
+        // the one just popped, otherwise attempts() is frozen and maxTries is
+        // never reached: a permanently failing job then cycles forever instead
+        // of landing in failed_jobs.
+        $reserved = $payload;
+        $decoded = json_decode($payload, true);
+
+        if (is_array($decoded)) {
+            $decoded['attempts'] = ($decoded['attempts'] ?? 0) + 1;
+            $reserved = json_encode($decoded);
+        }
+
         // Fire Horizon JobReserved event
         if ($this->isHorizonEnabled() && class_exists(\Laravel\Horizon\Events\JobReserved::class)) {
             $this->fireHorizonEvent($queueName, new \Laravel\Horizon\Events\JobReserved($payload));
@@ -300,7 +355,7 @@ class BalancedRedisQueue extends RedisQueue
             $this->container,
             $this,
             $payload,
-            $payload, // reserved is same as payload for balanced queue
+            $reserved,
             $this->connectionName,
             $queueName,
             $partition,
