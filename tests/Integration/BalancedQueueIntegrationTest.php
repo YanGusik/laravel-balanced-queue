@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace YanGusik\BalancedQueue\Tests\Integration;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Redis;
 use YanGusik\BalancedQueue\Queue\BalancedRedisQueue;
@@ -270,5 +271,94 @@ class BalancedQueueIntegrationTest extends IntegrationTestCase
         $poppedJob3 = $this->queue->pop('default');
         $this->assertNotNull($poppedJob3);
         $this->assertSame(3, $poppedJob3->attempts());
+    }
+
+    public function test_push_with_after_commit_is_deferred_until_transaction_commits(): void
+    {
+        $job = (new TestJob(['user_id' => 999]))->afterCommit();
+
+        DB::transaction(function () use ($job) {
+            $this->queue->push($job, '', 'default');
+
+            // Still inside the transaction — must not be visible yet
+            $this->assertEquals(0, $this->queue->size('default'));
+        });
+
+        // Transaction committed — now visible
+        $this->assertEquals(1, $this->queue->size('default'));
+    }
+
+    public function test_push_with_after_commit_is_discarded_on_rollback(): void
+    {
+        $job = (new TestJob(['user_id' => 999]))->afterCommit();
+
+        try {
+            DB::transaction(function () use ($job) {
+                $this->queue->push($job, '', 'default');
+
+                throw new \RuntimeException('forcing rollback');
+            });
+        } catch (\RuntimeException $e) {
+            // expected
+        }
+
+        $this->assertEquals(0, $this->queue->size('default'));
+        $this->assertEmpty($this->metrics->getPartitions('default'));
+    }
+
+    public function test_later_with_after_commit_is_deferred_until_transaction_commits(): void
+    {
+        $job = (new TestJob(['user_id' => 999]))->afterCommit();
+
+        DB::transaction(function () use ($job) {
+            $this->queue->later(3600, $job, '', 'default');
+
+            // Still inside the transaction - partition must not exist yet
+            $this->assertEmpty($this->metrics->getPartitions('default'));
+        });
+
+        // Transaction committed — delayed job now registered
+        $partitions = $this->metrics->getPartitions('default');
+        $this->assertContains('user:999', $partitions);
+    }
+
+    public function test_later_with_after_commit_is_discarded_on_rollback(): void
+    {
+        $job = (new TestJob(['user_id' => 999]))->afterCommit();
+
+        try {
+            DB::transaction(function () use ($job) {
+                $this->queue->later(3600, $job, '', 'default');
+
+                throw new \RuntimeException('forcing rollback');
+            });
+        } catch (\RuntimeException $e) {
+            // expected
+        }
+
+        $this->assertEmpty($this->metrics->getPartitions('default'));
+    }
+
+    public function test_partition_is_resolved_at_dispatch_time_not_at_commit_time(): void
+    {
+        $tenant = 'tenant-a';
+
+        $this->queue->setPartitionResolver(function () use (&$tenant) {
+            return $tenant;
+        });
+
+        $job = (new TestJobWithoutPartitionKey())->afterCommit();
+
+        DB::transaction(function () use ($job, &$tenant) {
+            $this->queue->push($job, '', 'default');
+
+            // Context changes after dispatch but before commit the
+            // partition must already be locked in at this point.
+            $tenant = 'tenant-b';
+        });
+
+        $partitions = $this->metrics->getPartitions('default');
+        $this->assertContains('tenant-a', $partitions);
+        $this->assertNotContains('tenant-b', $partitions);
     }
 }
