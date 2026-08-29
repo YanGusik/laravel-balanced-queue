@@ -38,7 +38,12 @@ class BalancedRedisJob extends RedisJob
      */
     public function release($delay = 0): void
     {
-        parent::release($delay);
+        // RedisJob::release() routes through RedisQueue::deleteAndRelease(),
+        // which targets the stock "queues:<name>:reserved" / ":delayed" keys.
+        // This driver stores nothing there, so that call finds no reservation
+        // to remove and its ZADD leaves an orphan payload in a namespace no
+        // balanced worker reads. Only the base Job flag is wanted here.
+        $this->released = true;
 
         /** @var BalancedRedisQueue $redis */
         $redis = $this->redis;
@@ -59,7 +64,9 @@ class BalancedRedisJob extends RedisJob
      */
     public function delete(): void
     {
-        parent::delete();
+        // Skipped for the same reason as in release(): RedisJob::delete()
+        // calls deleteReserved() against stock keys this driver never writes.
+        $this->deleted = true;
 
         /** @var BalancedRedisQueue $redis */
         $redis = $this->redis;
