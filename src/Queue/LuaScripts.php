@@ -47,6 +47,38 @@ class LuaScripts
     }
 
     /**
+     * Push a job to a partition's delayed set and register the partition atomically.
+     *
+     * KEYS[1] - partitions set key
+     * KEYS[2] - partition delayed key (ZSET)
+     * KEYS[3] - metrics key
+     * ARGV[1] - job payload
+     * ARGV[2] - partition identifier
+     * ARGV[3] - timestamp at which the job becomes available
+     */
+    public static function pushDelayed(): string
+    {
+        return <<<'LUA'
+            local partitions_key = KEYS[1]
+            local delayed_key = KEYS[2]
+            local metrics_key = KEYS[3]
+            local payload = ARGV[1]
+            local partition = ARGV[2]
+            local available_at = ARGV[3]
+
+            -- Register the partition and enqueue the payload in one step, so a
+            -- concurrent pop cannot remove the partition in between and strand
+            -- the delayed job in a partition no strategy will visit.
+            redis.call('SADD', partitions_key, partition)
+            redis.call('ZADD', delayed_key, available_at, payload)
+
+            redis.call('HINCRBY', metrics_key, 'total_pushed', 1)
+
+            return redis.call('ZCARD', delayed_key)
+        LUA;
+    }
+
+    /**
      * Pop a job from a partition queue.
      *
      * KEYS[1] - partition queue key
