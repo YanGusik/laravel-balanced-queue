@@ -1,5 +1,13 @@
 # Laravel Balanced Queue
 
+[![Latest Version](https://poser.pugx.org/yangusik/laravel-balanced-queue/v)](https://packagist.org/packages/yangusik/laravel-balanced-queue)
+[![Total Downloads](https://poser.pugx.org/yangusik/laravel-balanced-queue/downloads)](https://packagist.org/packages/yangusik/laravel-balanced-queue)
+[![Monthly Downloads](https://poser.pugx.org/yangusik/laravel-balanced-queue/d/monthly)](https://packagist.org/packages/yangusik/laravel-balanced-queue)
+[![License](https://poser.pugx.org/yangusik/laravel-balanced-queue/license)](https://packagist.org/packages/yangusik/laravel-balanced-queue)
+[![GitHub Stars](https://img.shields.io/github/stars/YanGusik/laravel-balanced-queue)](https://github.com/YanGusik/laravel-balanced-queue/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/YanGusik/laravel-balanced-queue)](https://github.com/YanGusik/laravel-balanced-queue/forks)
+[![GitHub Issues](https://img.shields.io/github/issues/YanGusik/laravel-balanced-queue)](https://github.com/YanGusik/laravel-balanced-queue/issues)
+
 A Laravel package for queue management with load balancing between partitions (user groups). Perfect for scenarios where you need fair job distribution and concurrency control per user/tenant.
 
 ## Problem Solved
